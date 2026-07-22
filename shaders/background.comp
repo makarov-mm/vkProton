@@ -1,0 +1,111 @@
+#version 450
+
+// Stage 3: local noise estimation on the difference image.
+// For every pixel it computes the mean and standard deviation of the difference
+// signal over an annulus: a ring from annulusInner to annulusOuter that skips the
+// central core. Skipping the core matters because a real transient sits at the
+// centre, and if it were included it would inflate the estimate of its own local
+// noise and hide itself. The difference image also has the right noise to measure
+// against: static structure has cancelled, so bright stars leave elevated photon
+// noise exactly where false positives would otherwise appear, and the annulus
+// picks that up and raises the local threshold there.
+//
+// One sigma clipping pass rejects any residual outliers from the ring.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer DiffBuffer { float diff[]; };
+layout(std430, binding = 1) writeonly buffer MeanBuffer { float diffMean[]; };
+layout(std430, binding = 2) writeonly buffer StdBuffer  { float diffStd[]; };
+
+layout(push_constant) uniform Push {
+    uint  width;
+    uint  height;
+    int   annulusOuter;
+    int   annulusInner;
+    float detectSigma;
+    float shapeRatio;
+    uint  maxDetections;
+    uint  hasPrev;
+} pc;
+
+void main() {
+    uint gx = gl_GlobalInvocationID.x;
+    uint gy = gl_GlobalInvocationID.y;
+    if (gx >= pc.width || gy >= pc.height) {
+        return;
+    }
+    uint i = gy * pc.width + gx;
+
+    if (pc.hasPrev == 0u) {
+        diffMean[i] = 0.0;
+        diffStd[i] = 1.0;
+        return;
+    }
+
+    int x = int(gx);
+    int y = int(gy);
+    int w = int(pc.width);
+    int h = int(pc.height);
+    int rOuter = pc.annulusOuter;
+    int rInner = pc.annulusInner;
+    int outer2 = rOuter * rOuter;
+    int inner2 = rInner * rInner;
+
+    // First pass over the annulus.
+    float sum = 0.0;
+    float sumSq = 0.0;
+    float count = 0.0;
+    for (int dy = -rOuter; dy <= rOuter; ++dy) {
+        for (int dx = -rOuter; dx <= rOuter; ++dx) {
+            int rr = dx * dx + dy * dy;
+            if (rr <= inner2 || rr > outer2) {
+                continue;
+            }
+            int nx = clamp(x + dx, 0, w - 1);
+            int ny = clamp(y + dy, 0, h - 1);
+            float v = diff[ny * w + nx];
+            sum += v;
+            sumSq += v * v;
+            count += 1.0;
+        }
+    }
+
+    float mean = 0.0;
+    float sigma = 1.0;
+    if (count > 1.0) {
+        mean = sum / count;
+        sigma = sqrt(max(sumSq / count - mean * mean, 0.0));
+    }
+
+    // Second pass: sigma clipping around the first estimate.
+    float lo = mean - 3.0 * sigma;
+    float hi = mean + 3.0 * sigma;
+    float csum = 0.0;
+    float csumSq = 0.0;
+    float ccount = 0.0;
+    for (int dy = -rOuter; dy <= rOuter; ++dy) {
+        for (int dx = -rOuter; dx <= rOuter; ++dx) {
+            int rr = dx * dx + dy * dy;
+            if (rr <= inner2 || rr > outer2) {
+                continue;
+            }
+            int nx = clamp(x + dx, 0, w - 1);
+            int ny = clamp(y + dy, 0, h - 1);
+            float v = diff[ny * w + nx];
+            if (v >= lo && v <= hi) {
+                csum += v;
+                csumSq += v * v;
+                ccount += 1.0;
+            }
+        }
+    }
+
+    if (ccount > 1.0) {
+        mean = csum / ccount;
+        sigma = sqrt(max(csumSq / ccount - mean * mean, 0.0));
+    }
+
+    diffMean[i] = mean;
+    diffStd[i] = max(sigma, 1e-3);
+}

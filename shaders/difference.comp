@@ -1,0 +1,38 @@
+#version 450
+
+// Stage 2: difference imaging.
+// Subtracts the previous calibrated frame from the current one. Static sources
+// cancel out, so what remains is anything that appeared, vanished or changed
+// brightness between the two exposures. This is the core trick behind transient
+// surveys: you do not search the sky, you search the difference of the sky.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer CalibBuffer { float calibrated[]; };
+layout(std430, binding = 1) readonly buffer PrevBuffer  { float prevCalibrated[]; };
+layout(std430, binding = 2) writeonly buffer DiffBuffer { float diff[]; };
+
+layout(push_constant) uniform Push {
+    uint  width;
+    uint  height;
+    int   annulusOuter;
+    int   annulusInner;
+    float detectSigma;
+    float shapeRatio;
+    uint  maxDetections;
+    uint  hasPrev;
+} pc;
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (x >= pc.width || y >= pc.height) {
+        return;
+    }
+    uint i = y * pc.width + x;
+    if (pc.hasPrev == 0u) {
+        diff[i] = 0.0;
+        return;
+    }
+    diff[i] = calibrated[i] - prevCalibrated[i];
+}

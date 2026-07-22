@@ -1,0 +1,21 @@
+﻿  Compiling shaders to SPIR-V
+  C:\Users\makar\Desktop\vkPhoton\shaders\calibrate.comp
+  C:\Users\makar\Desktop\vkPhoton\shaders\background.comp
+  C:\Users\makar\Desktop\vkPhoton\shaders\difference.comp
+  C:\Users\makar\Desktop\vkPhoton\shaders\detect.comp
+  main.cpp
+  VulkanContext.cpp
+  Buffer.cpp
+  ComputeProgram.cpp
+  FrameSource.cpp
+  TransientPipeline.cpp
+  CpuPipeline.cpp
+  ImageWriter.cpp
+  CatalogWriter.cpp
+  Timer.cpp
+  Paths.cpp
+  Swapchain.cpp
+  Viewer.cpp
+  Window_Win32.cpp
+  Generating Code...
+  vkPhoton.vcxproj -> C:\Users\makar\Desktop\vkPhoton\x64\Debug\vkPhoton.exe

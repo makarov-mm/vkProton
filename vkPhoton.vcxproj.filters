@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files"><UniqueIdentifier>{4d1e9b10-0001-4a00-9000-000000000001}</UniqueIdentifier></Filter>
+    <Filter Include="Source Files\core"><UniqueIdentifier>{4d1e9b10-0002-4a00-9000-000000000002}</UniqueIdentifier></Filter>
+    <Filter Include="Source Files\pipeline"><UniqueIdentifier>{4d1e9b10-0003-4a00-9000-000000000003}</UniqueIdentifier></Filter>
+    <Filter Include="Source Files\cpu"><UniqueIdentifier>{4d1e9b10-0004-4a00-9000-000000000004}</UniqueIdentifier></Filter>
+    <Filter Include="Source Files\io"><UniqueIdentifier>{4d1e9b10-0005-4a00-9000-000000000005}</UniqueIdentifier></Filter>
+    <Filter Include="Source Files\util"><UniqueIdentifier>{4d1e9b10-0006-4a00-9000-000000000006}</UniqueIdentifier></Filter>
+    <Filter Include="Source Files\viewer"><UniqueIdentifier>{4d1e9b10-0007-4a00-9000-000000000007}</UniqueIdentifier></Filter>
+    <Filter Include="Header Files"><UniqueIdentifier>{4d1e9b10-0008-4a00-9000-000000000008}</UniqueIdentifier></Filter>
+    <Filter Include="Header Files\core"><UniqueIdentifier>{4d1e9b10-0009-4a00-9000-000000000009}</UniqueIdentifier></Filter>
+    <Filter Include="Header Files\pipeline"><UniqueIdentifier>{4d1e9b10-000a-4a00-9000-00000000000a}</UniqueIdentifier></Filter>
+    <Filter Include="Header Files\cpu"><UniqueIdentifier>{4d1e9b10-000b-4a00-9000-00000000000b}</UniqueIdentifier></Filter>
+    <Filter Include="Header Files\io"><UniqueIdentifier>{4d1e9b10-000c-4a00-9000-00000000000c}</UniqueIdentifier></Filter>
+    <Filter Include="Header Files\util"><UniqueIdentifier>{4d1e9b10-000d-4a00-9000-00000000000d}</UniqueIdentifier></Filter>
+    <Filter Include="Header Files\viewer"><UniqueIdentifier>{4d1e9b10-000e-4a00-9000-00000000000e}</UniqueIdentifier></Filter>
+    <Filter Include="Shaders"><UniqueIdentifier>{4d1e9b10-000f-4a00-9000-00000000000f}</UniqueIdentifier></Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\main.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\core\VulkanContext.cpp"><Filter>Source Files\core</Filter></ClCompile>
+    <ClCompile Include="src\core\Buffer.cpp"><Filter>Source Files\core</Filter></ClCompile>
+    <ClCompile Include="src\core\ComputeProgram.cpp"><Filter>Source Files\core</Filter></ClCompile>
+    <ClCompile Include="src\pipeline\FrameSource.cpp"><Filter>Source Files\pipeline</Filter></ClCompile>
+    <ClCompile Include="src\pipeline\TransientPipeline.cpp"><Filter>Source Files\pipeline</Filter></ClCompile>
+    <ClCompile Include="src\cpu\CpuPipeline.cpp"><Filter>Source Files\cpu</Filter></ClCompile>
+    <ClCompile Include="src\io\ImageWriter.cpp"><Filter>Source Files\io</Filter></ClCompile>
+    <ClCompile Include="src\io\CatalogWriter.cpp"><Filter>Source Files\io</Filter></ClCompile>
+    <ClCompile Include="src\util\Timer.cpp"><Filter>Source Files\util</Filter></ClCompile>
+    <ClCompile Include="src\util\Paths.cpp"><Filter>Source Files\util</Filter></ClCompile>
+    <ClCompile Include="src\viewer\Swapchain.cpp"><Filter>Source Files\viewer</Filter></ClCompile>
+    <ClCompile Include="src\viewer\Viewer.cpp"><Filter>Source Files\viewer</Filter></ClCompile>
+    <ClCompile Include="src\viewer\Window_Win32.cpp"><Filter>Source Files\viewer</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\core\VulkanContext.hpp"><Filter>Header Files\core</Filter></ClInclude>
+    <ClInclude Include="src\core\Buffer.hpp"><Filter>Header Files\core</Filter></ClInclude>
+    <ClInclude Include="src\core\ComputeProgram.hpp"><Filter>Header Files\core</Filter></ClInclude>
+    <ClInclude Include="src\pipeline\Detection.hpp"><Filter>Header Files\pipeline</Filter></ClInclude>
+    <ClInclude Include="src\pipeline\PushConstants.hpp"><Filter>Header Files\pipeline</Filter></ClInclude>
+    <ClInclude Include="src\pipeline\FrameSource.hpp"><Filter>Header Files\pipeline</Filter></ClInclude>
+    <ClInclude Include="src\pipeline\TransientPipeline.hpp"><Filter>Header Files\pipeline</Filter></ClInclude>
+    <ClInclude Include="src\cpu\CpuPipeline.hpp"><Filter>Header Files\cpu</Filter></ClInclude>
+    <ClInclude Include="src\io\ImageWriter.hpp"><Filter>Header Files\io</Filter></ClInclude>
+    <ClInclude Include="src\io\CatalogWriter.hpp"><Filter>Header Files\io</Filter></ClInclude>
+    <ClInclude Include="src\util\Log.hpp"><Filter>Header Files\util</Filter></ClInclude>
+    <ClInclude Include="src\util\Timer.hpp"><Filter>Header Files\util</Filter></ClInclude>
+    <ClInclude Include="src\util\Paths.hpp"><Filter>Header Files\util</Filter></ClInclude>
+    <ClInclude Include="src\viewer\Window.hpp"><Filter>Header Files\viewer</Filter></ClInclude>
+    <ClInclude Include="src\viewer\Swapchain.hpp"><Filter>Header Files\viewer</Filter></ClInclude>
+    <ClInclude Include="src\viewer\Viewer.hpp"><Filter>Header Files\viewer</Filter></ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="shaders\calibrate.comp"><Filter>Shaders</Filter></None>
+    <None Include="shaders\background.comp"><Filter>Shaders</Filter></None>
+    <None Include="shaders\difference.comp"><Filter>Shaders</Filter></None>
+    <None Include="shaders\detect.comp"><Filter>Shaders</Filter></None>
+    <None Include="src\viewer\Window_Glfw.cpp"><Filter>Source Files\viewer</Filter></None>
+  </ItemGroup>
+</Project>

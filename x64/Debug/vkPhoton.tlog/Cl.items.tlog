@@ -1,0 +1,14 @@
+C:\Users\makar\Desktop\vkPhoton\src\main.cpp;C:\Users\makar\Desktop\vkPhoton\x64\Debug\main.obj
+C:\Users\makar\Desktop\vkPhoton\src\core\VulkanContext.cpp;C:\Users\makar\Desktop\vkPhoton\x64\Debug\VulkanContext.obj
+C:\Users\makar\Desktop\vkPhoton\src\core\Buffer.cpp;C:\Users\makar\Desktop\vkPhoton\x64\Debug\Buffer.obj
+C:\Users\makar\Desktop\vkPhoton\src\core\ComputeProgram.cpp;C:\Users\makar\Desktop\vkPhoton\x64\Debug\ComputeProgram.obj
+C:\Users\makar\Desktop\vkPhoton\src\pipeline\FrameSource.cpp;C:\Users\makar\Desktop\vkPhoton\x64\Debug\FrameSource.obj
+C:\Users\makar\Desktop\vkPhoton\src\pipeline\TransientPipeline.cpp;C:\Users\makar\Desktop\vkPhoton\x64\Debug\TransientPipeline.obj
+C:\Users\makar\Desktop\vkPhoton\src\cpu\CpuPipeline.cpp;C:\Users\makar\Desktop\vkPhoton\x64\Debug\CpuPipeline.obj
+C:\Users\makar\Desktop\vkPhoton\src\io\ImageWriter.cpp;C:\Users\makar\Desktop\vkPhoton\x64\Debug\ImageWriter.obj
+C:\Users\makar\Desktop\vkPhoton\src\io\CatalogWriter.cpp;C:\Users\makar\Desktop\vkPhoton\x64\Debug\CatalogWriter.obj
+C:\Users\makar\Desktop\vkPhoton\src\util\Timer.cpp;C:\Users\makar\Desktop\vkPhoton\x64\Debug\Timer.obj
+C:\Users\makar\Desktop\vkPhoton\src\util\Paths.cpp;C:\Users\makar\Desktop\vkPhoton\x64\Debug\Paths.obj
+C:\Users\makar\Desktop\vkPhoton\src\viewer\Swapchain.cpp;C:\Users\makar\Desktop\vkPhoton\x64\Debug\Swapchain.obj
+C:\Users\makar\Desktop\vkPhoton\src\viewer\Viewer.cpp;C:\Users\makar\Desktop\vkPhoton\x64\Debug\Viewer.obj
+C:\Users\makar\Desktop\vkPhoton\src\viewer\Window_Win32.cpp;C:\Users\makar\Desktop\vkPhoton\x64\Debug\Window_Win32.obj
