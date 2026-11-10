@@ -22,14 +22,14 @@
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
     <PlatformToolset>v145</PlatformToolset>
-    <CharacterSet>MultiByte</CharacterSet>
+    <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
-    <CharacterSet>MultiByte</CharacterSet>
+    <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings" />
@@ -38,16 +38,19 @@
   </ImportGroup>
   <PropertyGroup>
     <OutDir>$(SolutionDir)$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(Platform)\$(Configuration)\</IntDir>
+    <IntDir>$(Platform)\$(Configuration)\obj\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <WarningLevel>Level3</WarningLevel>
+      <WarningLevel>Level4</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(VULKAN_SDK)\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -58,22 +61,25 @@
     <PreBuildEvent>
       <Command>if not exist "$(OutDir)shaders" mkdir "$(OutDir)shaders"
 "$(VULKAN_SDK)\Bin\glslangValidator.exe" -V "$(ProjectDir)shaders\calibrate.comp" -o "$(OutDir)shaders\calibrate.comp.spv"
-"$(VULKAN_SDK)\Bin\glslangValidator.exe" -V "$(ProjectDir)shaders\background.comp" -o "$(OutDir)shaders\background.comp.spv"
 "$(VULKAN_SDK)\Bin\glslangValidator.exe" -V "$(ProjectDir)shaders\difference.comp" -o "$(OutDir)shaders\difference.comp.spv"
+"$(VULKAN_SDK)\Bin\glslangValidator.exe" -V "$(ProjectDir)shaders\background.comp" -o "$(OutDir)shaders\background.comp.spv"
 "$(VULKAN_SDK)\Bin\glslangValidator.exe" -V "$(ProjectDir)shaders\detect.comp" -o "$(OutDir)shaders\detect.comp.spv"</Command>
       <Message>Compiling shaders to SPIR-V</Message>
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <WarningLevel>Level3</WarningLevel>
+      <WarningLevel>Level4</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(VULKAN_SDK)\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -86,50 +92,56 @@
     <PreBuildEvent>
       <Command>if not exist "$(OutDir)shaders" mkdir "$(OutDir)shaders"
 "$(VULKAN_SDK)\Bin\glslangValidator.exe" -V "$(ProjectDir)shaders\calibrate.comp" -o "$(OutDir)shaders\calibrate.comp.spv"
-"$(VULKAN_SDK)\Bin\glslangValidator.exe" -V "$(ProjectDir)shaders\background.comp" -o "$(OutDir)shaders\background.comp.spv"
 "$(VULKAN_SDK)\Bin\glslangValidator.exe" -V "$(ProjectDir)shaders\difference.comp" -o "$(OutDir)shaders\difference.comp.spv"
+"$(VULKAN_SDK)\Bin\glslangValidator.exe" -V "$(ProjectDir)shaders\background.comp" -o "$(OutDir)shaders\background.comp.spv"
 "$(VULKAN_SDK)\Bin\glslangValidator.exe" -V "$(ProjectDir)shaders\detect.comp" -o "$(OutDir)shaders\detect.comp.spv"</Command>
       <Message>Compiling shaders to SPIR-V</Message>
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />
-    <ClCompile Include="src\core\VulkanContext.cpp" />
+    <ClCompile Include="src\app\Options.cpp" />
     <ClCompile Include="src\core\Buffer.cpp" />
     <ClCompile Include="src\core\ComputeProgram.cpp" />
+    <ClCompile Include="src\core\VulkanContext.cpp" />
+    <ClCompile Include="src\core\VulkanUtil.cpp" />
+    <ClCompile Include="src\cpu\CpuPipeline.cpp" />
+    <ClCompile Include="src\io\CatalogWriter.cpp" />
+    <ClCompile Include="src\io\ImageWriter.cpp" />
     <ClCompile Include="src\pipeline\FrameSource.cpp" />
     <ClCompile Include="src\pipeline\TransientPipeline.cpp" />
-    <ClCompile Include="src\cpu\CpuPipeline.cpp" />
-    <ClCompile Include="src\io\ImageWriter.cpp" />
-    <ClCompile Include="src\io\CatalogWriter.cpp" />
-    <ClCompile Include="src\util\Timer.cpp" />
     <ClCompile Include="src\util\Paths.cpp" />
     <ClCompile Include="src\viewer\Swapchain.cpp" />
     <ClCompile Include="src\viewer\Viewer.cpp" />
     <ClCompile Include="src\viewer\Window_Win32.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\core\VulkanContext.hpp" />
+    <ClInclude Include="src\app\Options.hpp" />
     <ClInclude Include="src\core\Buffer.hpp" />
     <ClInclude Include="src\core\ComputeProgram.hpp" />
-    <ClInclude Include="src\pipeline\Detection.hpp" />
-    <ClInclude Include="src\pipeline\PushConstants.hpp" />
-    <ClInclude Include="src\pipeline\FrameSource.hpp" />
-    <ClInclude Include="src\pipeline\TransientPipeline.hpp" />
+    <ClInclude Include="src\core\Handle.hpp" />
+    <ClInclude Include="src\core\VulkanContext.hpp" />
+    <ClInclude Include="src\core\VulkanUtil.hpp" />
     <ClInclude Include="src\cpu\CpuPipeline.hpp" />
-    <ClInclude Include="src\io\ImageWriter.hpp" />
     <ClInclude Include="src\io\CatalogWriter.hpp" />
+    <ClInclude Include="src\io\ImageWriter.hpp" />
+    <ClInclude Include="src\pipeline\Detection.hpp" />
+    <ClInclude Include="src\pipeline\FrameSource.hpp" />
+    <ClInclude Include="src\pipeline\PipelineConfig.hpp" />
+    <ClInclude Include="src\pipeline\PushConstants.hpp" />
+    <ClInclude Include="src\pipeline\TransientPipeline.hpp" />
     <ClInclude Include="src\util\Log.hpp" />
-    <ClInclude Include="src\util\Timer.hpp" />
     <ClInclude Include="src\util\Paths.hpp" />
-    <ClInclude Include="src\viewer\Window.hpp" />
+    <ClInclude Include="src\util\Timer.hpp" />
     <ClInclude Include="src\viewer\Swapchain.hpp" />
     <ClInclude Include="src\viewer\Viewer.hpp" />
+    <ClInclude Include="src\viewer\Window.hpp" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="shaders\common.glsl" />
     <None Include="shaders\calibrate.comp" />
-    <None Include="shaders\background.comp" />
     <None Include="shaders\difference.comp" />
+    <None Include="shaders\background.comp" />
     <None Include="shaders\detect.comp" />
     <None Include="src\viewer\Window_Glfw.cpp" />
   </ItemGroup>

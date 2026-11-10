@@ -1,42 +1,42 @@
 #include "Paths.hpp"
 
-#include <string>
-
 #if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
+
+#include <string>
 #else
-#include <limits.h>
-#include <unistd.h>
+#include <system_error>
 #endif
 
 namespace vkp {
 
-namespace {
-std::string stripFileName(const std::string& path) {
-    size_t slash = path.find_last_of("/\\");
-    if (slash == std::string::npos) {
-        return std::string();
-    }
-    return path.substr(0, slash);
-}
-} // namespace
-
-std::string executableDirectory() {
+std::filesystem::path executableDirectory() {
 #if defined(_WIN32)
-    char buffer[MAX_PATH] = {0};
-    DWORD length = GetModuleFileNameA(nullptr, buffer, MAX_PATH);
-    if (length == 0 || length == MAX_PATH) {
-        return std::string();
+    // The call truncates when the buffer is too small, so grow it until the path
+    // fits. That also covers long paths beyond MAX_PATH.
+    std::wstring buffer(MAX_PATH, L'\0');
+    for (;;) {
+        const DWORD length =
+            GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (length == 0) {
+            return {};
+        }
+        if (length < buffer.size()) {
+            buffer.resize(length);
+            return std::filesystem::path(buffer).parent_path();
+        }
+        buffer.resize(buffer.size() * 2);
     }
-    return stripFileName(std::string(buffer, length));
 #else
-    char buffer[PATH_MAX] = {0};
-    ssize_t length = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
-    if (length <= 0) {
-        return std::string();
-    }
-    buffer[length] = '\0';
-    return stripFileName(std::string(buffer));
+    std::error_code error;
+    const std::filesystem::path executable = std::filesystem::read_symlink("/proc/self/exe", error);
+    return error ? std::filesystem::path{} : executable.parent_path();
 #endif
 }
 

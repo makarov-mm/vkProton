@@ -5,60 +5,73 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
-#include <cstdlib>
+#include <stdexcept>
 
 #include "Window.hpp"
+#include "../core/VulkanUtil.hpp"
 #include "../util/Log.hpp"
 
 namespace vkp {
 
 struct Window::Impl {
     GLFWwindow* handle = nullptr;
+
+    Impl() = default;
+    Impl(const Impl&) = delete;
+    Impl& operator=(const Impl&) = delete;
+
+    ~Impl() {
+        if (handle != nullptr) {
+            glfwDestroyWindow(handle);
+        }
+        // Safe to call even when initialisation never succeeded.
+        glfwTerminate();
+    }
 };
 
-Window::Window(uint32_t width, uint32_t height, const std::string& title) : impl_(new Impl()) {
+Window::Window(std::uint32_t width, std::uint32_t height, const std::string& title)
+    : impl_(std::make_unique<Impl>()) {
+    glfwSetErrorCallback([](int, const char* description) { logError("GLFW: {}", description); });
+
     if (glfwInit() != GLFW_TRUE) {
-        logError("failed to initialise GLFW");
-        std::abort();
+        throw std::runtime_error("failed to initialise GLFW");
     }
     if (glfwVulkanSupported() != GLFW_TRUE) {
-        logError("GLFW reports no Vulkan support on this system");
-        std::abort();
+        throw std::runtime_error("GLFW reports no Vulkan support on this system");
     }
+
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     impl_->handle = glfwCreateWindow(static_cast<int>(width), static_cast<int>(height),
                                      title.c_str(), nullptr, nullptr);
     if (impl_->handle == nullptr) {
-        logError("failed to create a GLFW window");
-        std::abort();
+        throw std::runtime_error("failed to create a GLFW window");
     }
+
+    // Escape closes the viewer, which is the expected behaviour for a tool window.
+    // The callback sees every key press. Polling the key state instead would miss
+    // a tap that starts and ends between two frames.
+    glfwSetKeyCallback(impl_->handle, [](GLFWwindow* window, int key, int, int action, int) {
+        if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+        }
+    });
 }
 
-Window::~Window() {
-    if (impl_->handle != nullptr) {
-        glfwDestroyWindow(impl_->handle);
-    }
-    glfwTerminate();
-    delete impl_;
-}
+Window::~Window() = default;
 
 std::vector<const char*> Window::requiredInstanceExtensions() const {
-    uint32_t count = 0;
+    std::uint32_t count = 0;
     const char** names = glfwGetRequiredInstanceExtensions(&count);
-    std::vector<const char*> extensions;
-    extensions.reserve(count);
-    for (uint32_t i = 0; i < count; ++i) {
-        extensions.push_back(names[i]);
+    if (names == nullptr) {
+        throw std::runtime_error("GLFW cannot create Vulkan surfaces on this system");
     }
-    return extensions;
+    return std::vector<const char*>(names, names + count);
 }
 
 VkSurfaceKHR Window::createSurface(VkInstance instance) const {
     VkSurfaceKHR surface = VK_NULL_HANDLE;
-    if (glfwCreateWindowSurface(instance, impl_->handle, nullptr, &surface) != VK_SUCCESS) {
-        logError("failed to create a window surface through GLFW");
-        std::abort();
-    }
+    vkCheck(glfwCreateWindowSurface(instance, impl_->handle, nullptr, &surface),
+            "glfwCreateWindowSurface");
     return surface;
 }
 
@@ -67,19 +80,14 @@ void Window::pollEvents() {
 }
 
 bool Window::shouldClose() const {
-    if (glfwWindowShouldClose(impl_->handle)) {
-        return true;
-    }
-    // Escape closes the viewer, which is the expected behaviour for a tool window.
-    return glfwGetKey(impl_->handle, GLFW_KEY_ESCAPE) == GLFW_PRESS;
+    return glfwWindowShouldClose(impl_->handle) == GLFW_TRUE;
 }
 
-void Window::framebufferSize(uint32_t& width, uint32_t& height) const {
-    int w = 0;
-    int h = 0;
-    glfwGetFramebufferSize(impl_->handle, &w, &h);
-    width = static_cast<uint32_t>(w);
-    height = static_cast<uint32_t>(h);
+VkExtent2D Window::framebufferSize() const {
+    int width = 0;
+    int height = 0;
+    glfwGetFramebufferSize(impl_->handle, &width, &height);
+    return {static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height)};
 }
 
 } // namespace vkp

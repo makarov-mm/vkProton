@@ -1,16 +1,21 @@
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <iomanip>
-#include <iostream>
-#include <sstream>
-#include <string>
+#include <exception>
+#include <filesystem>
+#include <format>
+#include <span>
+#include <stdexcept>
+#include <system_error>
 #include <thread>
 #include <vector>
 
-#include "cpu/CpuPipeline.hpp"
+#include "app/Options.hpp"
 #include "core/VulkanContext.hpp"
+#include "cpu/CpuPipeline.hpp"
 #include "io/CatalogWriter.hpp"
 #include "io/ImageWriter.hpp"
 #include "pipeline/FrameSource.hpp"
@@ -22,139 +27,167 @@
 
 namespace {
 
-struct Options {
-    uint32_t width = 1024;
-    uint32_t height = 1024;
-    uint32_t frames = 30;
-    uint32_t seed = 1;
-    uint32_t maxImages = 8;
-    int annulusOuter = 7;
-    int annulusInner = 4;
-    float detectSigma = 6.0f;
-    float shapeRatio = 0.35f;
-    bool writeImages = true;
-    bool runBenchmark = true;
-    bool validation = false;
-    bool view = false;
-    uint32_t viewFps = 8;
-    std::string outputDir = "output";
-};
-
-void printUsage() {
-    std::cout <<
-        "vkPhoton - Vulkan compute pipeline for streaming transient detection\n\n"
-        "Options:\n"
-        "  --width N          frame width in pixels (default 1024)\n"
-        "  --height N         frame height in pixels (default 1024)\n"
-        "  --frames N         number of frames to stream (default 30)\n"
-        "  --seed N           random seed for the synthetic sky (default 1)\n"
-        "  --detect-sigma F   detection threshold in local noise units (default 6.0)\n"
-        "  --annulus-outer N  outer radius of the noise annulus (default 7)\n"
-        "  --annulus-inner N  inner radius excluded from the annulus (default 4)\n"
-        "  --shape-ratio F    minimum neighbour to centre ratio, 0 disables (default 0.35)\n"
-        "  --max-images N     cap on annotated frames written (default 8)\n"
-        "  --output DIR       output directory (default output)\n"
-        "  --view             open a live window and stream the pipeline into it\n"
-        "  --view-fps N       target frames per second in the viewer (default 8)\n"
-        "  --no-images        skip writing annotated frames\n"
-        "  --no-benchmark     skip the CPU baseline comparison\n"
-        "  --validation       enable the Vulkan validation layer\n"
-        "  --help             show this message\n";
-}
-
-bool parseArgs(int argc, char** argv, Options& options) {
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        auto next = [&](uint32_t& out) {
-            if (i + 1 < argc) {
-                out = static_cast<uint32_t>(std::stoul(argv[++i]));
-            }
-        };
-        auto nextFloat = [&](float& out) {
-            if (i + 1 < argc) {
-                out = std::stof(argv[++i]);
-            }
-        };
-        if (arg == "--width") next(options.width);
-        else if (arg == "--height") next(options.height);
-        else if (arg == "--frames") next(options.frames);
-        else if (arg == "--seed") next(options.seed);
-        else if (arg == "--detect-sigma") nextFloat(options.detectSigma);
-        else if (arg == "--annulus-outer") { uint32_t v = 7; next(v); options.annulusOuter = static_cast<int>(v); }
-        else if (arg == "--annulus-inner") { uint32_t v = 4; next(v); options.annulusInner = static_cast<int>(v); }
-        else if (arg == "--shape-ratio") nextFloat(options.shapeRatio);
-        else if (arg == "--max-images") next(options.maxImages);
-        else if (arg == "--output") { if (i + 1 < argc) options.outputDir = argv[++i]; }
-        else if (arg == "--view") options.view = true;
-        else if (arg == "--view-fps") next(options.viewFps);
-        else if (arg == "--no-images") options.writeImages = false;
-        else if (arg == "--no-benchmark") options.runBenchmark = false;
-        else if (arg == "--validation") options.validation = true;
-        else if (arg == "--help") { printUsage(); return false; }
-        else { vkp::logError("unknown argument: " + arg); printUsage(); return false; }
-    }
-    return true;
+vkp::PipelineConfig makeConfig(const vkp::Options& options) {
+    return {
+        .width = options.width,
+        .height = options.height,
+        .annulusOuter = options.annulusOuter,
+        .annulusInner = options.annulusInner,
+        .detectSigma = options.detectSigma,
+        .shapeRatio = options.shapeRatio,
+    };
 }
 
 // Counts how many injected transients have a detection within a small radius.
-uint32_t countRecovered(const std::vector<vkp::TransientTruth>& truth,
-                        const std::vector<vkp::Detection>& detections) {
-    const int tolerance = 3;
-    uint32_t recovered = 0;
-    for (const auto& t : truth) {
-        for (const auto& d : detections) {
-            int dx = static_cast<int>(d.x) - static_cast<int>(t.x);
-            int dy = static_cast<int>(d.y) - static_cast<int>(t.y);
-            if (dx * dx + dy * dy <= tolerance * tolerance) {
-                ++recovered;
-                break;
-            }
-        }
+std::uint32_t countRecovered(std::span<const vkp::TransientTruth> truth,
+                             std::span<const vkp::Detection> detections) {
+    constexpr int tolerance = 3;
+    const auto recovered = std::ranges::count_if(truth, [&](const vkp::TransientTruth& t) {
+        return std::ranges::any_of(detections, [&](const vkp::Detection& d) {
+            const int dx = static_cast<int>(d.x) - static_cast<int>(t.x);
+            const int dy = static_cast<int>(d.y) - static_cast<int>(t.y);
+            return dx * dx + dy * dy <= tolerance * tolerance;
+        });
+    });
+    return static_cast<std::uint32_t>(recovered);
+}
+
+void createOutputDirectory(const std::filesystem::path& directory) {
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+    if (error) {
+        throw std::runtime_error(std::format("cannot create output directory {}: {}",
+                                             directory.string(), error.message()));
     }
-    return recovered;
 }
 
-std::string frameImagePath(const std::string& dir, uint32_t frame) {
-    std::ostringstream out;
-    out << dir << "/frame_" << std::setfill('0') << std::setw(4) << frame << ".ppm";
-    return out.str();
+// Initial window size for a frame: the frame's own size, scaled so its longer side
+// fits a typical desktop and tiny frames are still large enough to look at. The
+// viewer letterboxes, so the lower bound on the shorter side only adds black bars.
+VkExtent2D initialWindowSize(std::uint32_t frameWidth, std::uint32_t frameHeight) {
+    constexpr double minLongSide = 256.0;
+    constexpr double maxLongSide = 1000.0;
+    constexpr long minSide = 64;
+
+    const double longSide = std::max(frameWidth, frameHeight);
+    const double scale = std::clamp(1.0, minLongSide / longSide, maxLongSide / longSide);
+    const auto side = [=](std::uint32_t frameSide) {
+        return static_cast<std::uint32_t>(std::max(std::lround(frameSide * scale), minSide));
+    };
+    return {side(frameWidth), side(frameHeight)};
 }
 
-vkp::PipelineConfig makeConfig(const Options& options) {
-    vkp::PipelineConfig config;
-    config.width = options.width;
-    config.height = options.height;
-    config.annulusOuter = options.annulusOuter;
-    config.annulusInner = options.annulusInner;
-    config.detectSigma = options.detectSigma;
-    config.shapeRatio = options.shapeRatio;
-    return config;
+// Headless mode. Streams the synthetic sky through the GPU pipeline, writes the
+// catalogue and a few annotated frames, then reports recall against the injected
+// truth and throughput against the CPU reference.
+void runHeadless(const vkp::Options& options) {
+    // The CPU baseline only has to establish a reference rate, so it runs on the
+    // first few frames. The speedup compares the two pipelines on exactly those.
+    constexpr std::uint32_t maxBenchmarkFrames = 6;
+
+    const vkp::PipelineConfig config = makeConfig(options);
+    const double megapixels = static_cast<double>(config.width) * config.height / 1.0e6;
+    const std::uint32_t benchmarkFrames = std::min(options.frames, maxBenchmarkFrames);
+
+    vkp::logInfo("frame size {}x{}, {} frames", config.width, config.height, options.frames);
+
+    // A bad output path is the cheapest thing to find out about, so check it first.
+    createOutputDirectory(options.outputDir);
+
+    const vkp::VulkanContext context({.enableValidation = options.validation});
+    vkp::FrameSource source(config.width, config.height, options.seed);
+    vkp::TransientPipeline pipeline(context, config);
+    pipeline.uploadCalibration(source.biasField(), source.flatInvField());
+
+    vkp::CatalogWriter catalog(options.outputDir / "transients.csv");
+    std::vector<float> raw;
+    std::uint32_t totalTruth = 0;
+    std::uint32_t totalRecovered = 0;
+    std::uint32_t imagesWritten = 0;
+    // Pipeline time only: upload, the four compute stages and readback. Generating
+    // the synthetic sky and writing files are not part of what is being measured.
+    double gpuSeconds = 0.0;
+    double gpuBenchmarkSeconds = 0.0;
+
+    for (std::uint32_t frame = 0; frame < options.frames; ++frame) {
+        source.generateRaw(frame, raw);
+        const bool wantImage = options.writeImages && imagesWritten < options.maxImages;
+
+        const vkp::Timer timer;
+        const vkp::FrameResult result = pipeline.processFrame(raw, wantImage);
+        const double seconds = timer.elapsedSeconds();
+        gpuSeconds += seconds;
+        if (frame < benchmarkFrames) {
+            gpuBenchmarkSeconds += seconds;
+        }
+
+        catalog.writeFrame(frame, result.detections);
+        if (wantImage) {
+            vkp::writeAnnotatedPpm(options.outputDir / std::format("frame_{:04}.ppm", frame),
+                                   result.calibrated, config.width, config.height,
+                                   result.detections);
+            ++imagesWritten;
+        }
+
+        const std::span<const vkp::TransientTruth> truth = source.lastTransients();
+        const std::uint32_t recovered = countRecovered(truth, result.detections);
+        totalTruth += static_cast<std::uint32_t>(truth.size());
+        totalRecovered += recovered;
+
+        vkp::logInfo("frame {:3}  detections {:4}  injected {}  recovered {}", frame,
+                     result.reportedCount, truth.size(), recovered);
+    }
+    catalog.close();
+
+    const double gpuFps = options.frames / gpuSeconds;
+    const double recall = totalTruth > 0 ? 100.0 * totalRecovered / totalTruth : 0.0;
+    vkp::logInfo("");
+    vkp::logInfo("GPU summary");
+    vkp::logInfo("  processed {} frames in {:.3f} s  ({:.1f} fps, {:.1f} Mpix/s)", options.frames,
+                 gpuSeconds, gpuFps, gpuFps * megapixels);
+    vkp::logInfo("  recovered {} of {} injected transients ({:.1f} percent recall)",
+                 totalRecovered, totalTruth, recall);
+
+    if (options.runBenchmark) {
+        vkp::CpuPipeline cpu(config);
+        cpu.uploadCalibration(source.biasField(), source.flatInvField());
+
+        double cpuSeconds = 0.0;
+        for (std::uint32_t frame = 0; frame < benchmarkFrames; ++frame) {
+            source.generateRaw(frame, raw);
+            const vkp::Timer timer;
+            cpu.processFrame(raw);
+            cpuSeconds += timer.elapsedSeconds();
+        }
+        const double cpuFps = benchmarkFrames / cpuSeconds;
+
+        vkp::logInfo("");
+        vkp::logInfo("CPU baseline (single thread reference)");
+        vkp::logInfo("  {} frames in {:.3f} s  ({:.2f} fps, {:.1f} Mpix/s)", benchmarkFrames,
+                     cpuSeconds, cpuFps, cpuFps * megapixels);
+        vkp::logInfo("  GPU speedup over CPU baseline: {:.1f}x", cpuSeconds / gpuBenchmarkSeconds);
+    }
+
+    vkp::logInfo("");
+    vkp::logInfo("wrote {} annotated frames and a catalogue to {}/", imagesWritten,
+                 options.outputDir.string());
 }
 
 // Live viewer mode. Streams the synthetic sky through the pipeline and presents
 // each annotated frame in a window, looping over the sequence until the window is
 // closed. The pipeline history is reset on each wrap so difference imaging starts
 // clean, exactly as it would at the top of a fresh observing run.
-int runViewer(const Options& options) {
-    vkp::PipelineConfig config = makeConfig(options);
+void runViewer(const vkp::Options& options) {
+    const vkp::PipelineConfig config = makeConfig(options);
+    const VkExtent2D windowSize = initialWindowSize(config.width, config.height);
+    vkp::Window window(windowSize.width, windowSize.height, "vkPhoton");
 
-    uint32_t winW = std::min(config.width, 1000u);
-    uint32_t winH = std::min(config.height, 1000u);
-    vkp::Window window(winW, winH, "vkPhoton");
-
-    vkp::ContextConfig ctxConfig;
-    ctxConfig.enableValidation = options.validation;
-    ctxConfig.enablePresent = true;
-    ctxConfig.instanceExtensions = window.requiredInstanceExtensions();
-    ctxConfig.surfaceFactory = [&window](VkInstance instance) {
-        return window.createSurface(instance);
-    };
-
-    vkp::VulkanContext context(ctxConfig);
-    if (!context.hasPresent()) {
-        vkp::logError("the selected device cannot present to a window");
-        return 1;
-    }
+    // The window outlives the context, so the surface goes before the window does.
+    const vkp::VulkanContext context({
+        .enableValidation = options.validation,
+        .instanceExtensions = window.requiredInstanceExtensions(),
+        .createSurface = [&window](VkInstance instance) { return window.createSurface(instance); },
+    });
 
     vkp::FrameSource source(config.width, config.height, options.seed);
     vkp::TransientPipeline pipeline(context, config);
@@ -163,153 +196,54 @@ int runViewer(const Options& options) {
 
     vkp::logInfo("viewer running, close the window or press Escape to quit");
 
-    const auto frameInterval = std::chrono::milliseconds(
-        options.viewFps > 0 ? 1000 / options.viewFps : 0);
+    using Clock = std::chrono::steady_clock;
+    const auto frameInterval = std::chrono::duration_cast<Clock::duration>(
+        std::chrono::duration<double>(options.viewFps > 0 ? 1.0 / options.viewFps : 0.0));
 
     std::vector<float> raw;
-    uint32_t frame = 0;
-    while (!window.shouldClose()) {
+    std::uint32_t frame = 0;
+    for (;;) {
         window.pollEvents();
-        auto tick = std::chrono::steady_clock::now();
+        if (window.shouldClose()) {
+            break;
+        }
+        const Clock::time_point frameStart = Clock::now();
 
         source.generateRaw(frame, raw);
-        vkp::FrameResult result = pipeline.processFrame(raw);
-        std::vector<uint8_t> rgba = vkp::ImageWriter::buildRgba(
-            pipeline.lastCalibrated(), config.width, config.height, result.detections);
-        viewer.showFrame(rgba);
+        const vkp::FrameResult result = pipeline.processFrame(raw, true);
+        viewer.showFrame(vkp::buildRgba(result.calibrated, config.width, config.height,
+                                        result.detections));
 
-        ++frame;
-        if (frame >= options.frames) {
+        if (++frame >= options.frames) {
             frame = 0;
             pipeline.resetHistory();
         }
-
-        std::this_thread::sleep_until(tick + frameInterval);
+        std::this_thread::sleep_until(frameStart + frameInterval);
     }
-
-    vkDeviceWaitIdle(context.device());
-    return 0;
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
-    Options options;
-    if (!parseArgs(argc, argv, options)) {
-        return 0;
-    }
-
-    if (options.view) {
-        return runViewer(options);
-    }
-
-    vkp::PipelineConfig config = makeConfig(options);
-
-    const double megapixels = static_cast<double>(config.width) * config.height / 1.0e6;
-
-    vkp::logInfo("frame size " + std::to_string(config.width) + "x" +
-                 std::to_string(config.height) + ", " + std::to_string(options.frames) + " frames");
-
-    vkp::VulkanContext context(options.validation);
-    vkp::FrameSource source(config.width, config.height, options.seed);
-    vkp::TransientPipeline pipeline(context, config);
-    pipeline.uploadCalibration(source.biasField(), source.flatInvField());
-
-    vkp::CatalogWriter catalog(options.outputDir + "/transients.csv");
-    if (!catalog.isOpen()) {
-        vkp::logError("could not open catalogue file, does the output directory exist?");
-        vkp::logInfo("create it first, for example: mkdir -p " + options.outputDir);
-        return 1;
-    }
-
-    std::vector<float> raw;
-    uint32_t totalReported = 0;
-    uint32_t totalTruth = 0;
-    uint32_t totalRecovered = 0;
-    uint32_t imagesWritten = 0;
-
-    vkp::Timer gpuTimer;
-    for (uint32_t frame = 0; frame < options.frames; ++frame) {
-        source.generateRaw(frame, raw);
-        vkp::FrameResult result = pipeline.processFrame(raw);
-
-        catalog.writeFrame(frame, result.detections);
-
-        const auto& truth = source.lastTransients();
-        uint32_t recovered = countRecovered(truth, result.detections);
-        totalReported += result.reportedCount;
-        totalTruth += static_cast<uint32_t>(truth.size());
-        totalRecovered += recovered;
-
-        if (options.writeImages && imagesWritten < options.maxImages) {
-            std::string path = frameImagePath(options.outputDir, frame);
-            if (vkp::ImageWriter::writeAnnotatedPpm(path, pipeline.lastCalibrated(),
-                                                    config.width, config.height,
-                                                    result.detections)) {
-                ++imagesWritten;
-            }
+    try {
+        const std::span<const char* const> arguments(argv, static_cast<std::size_t>(argc));
+        const auto options = vkp::parseOptions(arguments.subspan(arguments.empty() ? 0 : 1));
+        if (!options) {
+            vkp::logError("{}", options.error());
+            vkp::logError("run with --help for the list of options");
+            return EXIT_FAILURE;
         }
 
-        std::ostringstream line;
-        line << "frame " << std::setw(3) << frame
-             << "  detections " << std::setw(4) << result.reportedCount
-             << "  injected " << truth.size()
-             << "  recovered " << recovered;
-        vkp::logInfo(line.str());
-    }
-    double gpuSeconds = gpuTimer.elapsedSeconds();
-
-    vkp::logInfo("");
-    vkp::logInfo("GPU summary");
-    {
-        double fps = options.frames / gpuSeconds;
-        std::ostringstream out;
-        out << "  processed " << options.frames << " frames in "
-            << std::fixed << std::setprecision(3) << gpuSeconds << " s"
-            << "  (" << std::setprecision(1) << fps << " fps, "
-            << std::setprecision(1) << fps * megapixels << " Mpix/s)";
-        vkp::logInfo(out.str());
-    }
-    {
-        std::ostringstream out;
-        double recall = totalTruth > 0 ? 100.0 * totalRecovered / totalTruth : 0.0;
-        out << "  recovered " << totalRecovered << " of " << totalTruth
-            << " injected transients (" << std::fixed << std::setprecision(1) << recall << " percent recall)";
-        vkp::logInfo(out.str());
-    }
-
-    if (options.runBenchmark) {
-        vkp::CpuPipeline cpu(config);
-        cpu.uploadCalibration(source.biasField(), source.flatInvField());
-        // Keep the CPU baseline short when the image is large, it is only there
-        // to establish a reference rate.
-        uint32_t benchFrames = options.frames < 6 ? options.frames : 6;
-
-        vkp::Timer cpuTimer;
-        for (uint32_t frame = 0; frame < benchFrames; ++frame) {
-            source.generateRaw(frame, raw);
-            cpu.processFrame(raw);
+        if (options->showHelp) {
+            vkp::printUsage();
+        } else if (options->view) {
+            runViewer(*options);
+        } else {
+            runHeadless(*options);
         }
-        double cpuSeconds = cpuTimer.elapsedSeconds();
-        double cpuFps = benchFrames / cpuSeconds;
-        double gpuFps = options.frames / gpuSeconds;
-
-        vkp::logInfo("");
-        vkp::logInfo("CPU baseline (single thread reference)");
-        std::ostringstream out;
-        out << "  " << benchFrames << " frames in " << std::fixed << std::setprecision(3)
-            << cpuSeconds << " s  (" << std::setprecision(2) << cpuFps << " fps, "
-            << std::setprecision(1) << cpuFps * megapixels << " Mpix/s)";
-        vkp::logInfo(out.str());
-
-        std::ostringstream speedup;
-        speedup << "  GPU speedup over CPU baseline: " << std::fixed << std::setprecision(1)
-                << (gpuFps / cpuFps) << "x";
-        vkp::logInfo(speedup.str());
+        return EXIT_SUCCESS;
+    } catch (const std::exception& error) {
+        vkp::logError("{}", error.what());
+        return EXIT_FAILURE;
     }
-
-    vkp::logInfo("");
-    vkp::logInfo("wrote " + std::to_string(imagesWritten) + " annotated frames and a catalogue to " +
-                 options.outputDir + "/");
-    return 0;
 }

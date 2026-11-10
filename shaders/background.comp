@@ -1,4 +1,5 @@
-#version 450
+#version 460
+#extension GL_GOOGLE_include_directive : require
 
 // Stage 3: local noise estimation on the difference image.
 // For every pixel it computes the mean and standard deviation of the difference
@@ -12,22 +13,56 @@
 //
 // One sigma clipping pass rejects any residual outliers from the ring.
 
-layout(local_size_x = 16, local_size_y = 16) in;
+#include "common.glsl"
 
-layout(std430, binding = 0) readonly buffer DiffBuffer { float diff[]; };
+layout(std430, binding = 0) readonly buffer DiffBuffer  { float diff[]; };
 layout(std430, binding = 1) writeonly buffer MeanBuffer { float diffMean[]; };
 layout(std430, binding = 2) writeonly buffer StdBuffer  { float diffStd[]; };
 
-layout(push_constant) uniform Push {
-    uint  width;
-    uint  height;
-    int   annulusOuter;
-    int   annulusInner;
-    float detectSigma;
-    float shapeRatio;
-    uint  maxDetections;
-    uint  hasPrev;
-} pc;
+struct RingStats {
+    float mean;
+    float sigma;
+};
+
+// Mean and standard deviation of the annulus samples around (x, y). Coordinates are
+// clamped to the frame, so the ring is complete at the edges too. With clip set,
+// only samples within three sigma of the given estimate are counted. With fewer
+// than two samples left the estimate is returned as is.
+RingStats ringStats(int x, int y, bool clip, RingStats estimate) {
+    int w = int(pc.width);
+    int h = int(pc.height);
+    int rOuter = pc.annulusOuter;
+    int outer2 = rOuter * rOuter;
+    int inner2 = pc.annulusInner * pc.annulusInner;
+    float lo = estimate.mean - 3.0 * estimate.sigma;
+    float hi = estimate.mean + 3.0 * estimate.sigma;
+
+    float sum = 0.0;
+    float sumSq = 0.0;
+    float count = 0.0;
+    for (int dy = -rOuter; dy <= rOuter; ++dy) {
+        for (int dx = -rOuter; dx <= rOuter; ++dx) {
+            int rr = dx * dx + dy * dy;
+            if (rr <= inner2 || rr > outer2) {
+                continue;
+            }
+            int nx = clamp(x + dx, 0, w - 1);
+            int ny = clamp(y + dy, 0, h - 1);
+            float v = diff[ny * w + nx];
+            if (!clip || (v >= lo && v <= hi)) {
+                sum += v;
+                sumSq += v * v;
+                count += 1.0;
+            }
+        }
+    }
+
+    if (count <= 1.0) {
+        return estimate;
+    }
+    float mean = sum / count;
+    return RingStats(mean, sqrt(max(sumSq / count - mean * mean, 0.0)));
+}
 
 void main() {
     uint gx = gl_GlobalInvocationID.x;
@@ -45,67 +80,13 @@ void main() {
 
     int x = int(gx);
     int y = int(gy);
-    int w = int(pc.width);
-    int h = int(pc.height);
-    int rOuter = pc.annulusOuter;
-    int rInner = pc.annulusInner;
-    int outer2 = rOuter * rOuter;
-    int inner2 = rInner * rInner;
 
-    // First pass over the annulus.
-    float sum = 0.0;
-    float sumSq = 0.0;
-    float count = 0.0;
-    for (int dy = -rOuter; dy <= rOuter; ++dy) {
-        for (int dx = -rOuter; dx <= rOuter; ++dx) {
-            int rr = dx * dx + dy * dy;
-            if (rr <= inner2 || rr > outer2) {
-                continue;
-            }
-            int nx = clamp(x + dx, 0, w - 1);
-            int ny = clamp(y + dy, 0, h - 1);
-            float v = diff[ny * w + nx];
-            sum += v;
-            sumSq += v * v;
-            count += 1.0;
-        }
-    }
+    // First pass over the whole ring, then one pass clipped around that estimate.
+    // clip is a constant at both call sites, so the range test costs nothing in the
+    // first pass once the driver has inlined the function.
+    RingStats stats = ringStats(x, y, false, RingStats(0.0, 1.0));
+    stats = ringStats(x, y, true, stats);
 
-    float mean = 0.0;
-    float sigma = 1.0;
-    if (count > 1.0) {
-        mean = sum / count;
-        sigma = sqrt(max(sumSq / count - mean * mean, 0.0));
-    }
-
-    // Second pass: sigma clipping around the first estimate.
-    float lo = mean - 3.0 * sigma;
-    float hi = mean + 3.0 * sigma;
-    float csum = 0.0;
-    float csumSq = 0.0;
-    float ccount = 0.0;
-    for (int dy = -rOuter; dy <= rOuter; ++dy) {
-        for (int dx = -rOuter; dx <= rOuter; ++dx) {
-            int rr = dx * dx + dy * dy;
-            if (rr <= inner2 || rr > outer2) {
-                continue;
-            }
-            int nx = clamp(x + dx, 0, w - 1);
-            int ny = clamp(y + dy, 0, h - 1);
-            float v = diff[ny * w + nx];
-            if (v >= lo && v <= hi) {
-                csum += v;
-                csumSq += v * v;
-                ccount += 1.0;
-            }
-        }
-    }
-
-    if (ccount > 1.0) {
-        mean = csum / ccount;
-        sigma = sqrt(max(csumSq / ccount - mean * mean, 0.0));
-    }
-
-    diffMean[i] = mean;
-    diffStd[i] = max(sigma, 1e-3);
+    diffMean[i] = stats.mean;
+    diffStd[i] = max(stats.sigma, 1e-3);
 }

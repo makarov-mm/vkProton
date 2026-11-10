@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace vkp {
@@ -9,8 +10,8 @@ namespace vkp {
 // The pipeline never sees this. It exists so the demo can report how many real
 // events the detector recovered.
 struct TransientTruth {
-    uint32_t x;
-    uint32_t y;
+    std::uint32_t x;
+    std::uint32_t y;
     float flux;
 };
 
@@ -23,43 +24,39 @@ struct TransientTruth {
 // Everything is deterministic given the seed, so a run is fully reproducible.
 class FrameSource {
 public:
-    FrameSource(uint32_t width, uint32_t height, uint32_t seed);
+    // Smallest frame side the generator supports. Stars and transients keep a few
+    // pixels clear of the edges, so anything smaller leaves no room to place them.
+    static constexpr std::uint32_t kMinSide = 16;
 
-    uint32_t width() const { return width_; }
-    uint32_t height() const { return height_; }
-    size_t pixelCount() const { return static_cast<size_t>(width_) * height_; }
+    FrameSource(std::uint32_t width, std::uint32_t height, std::uint32_t seed);
 
     // Master calibration frames, constant across the run.
-    const std::vector<float>& biasField() const { return bias_; }
-    const std::vector<float>& flatInvField() const { return flatInv_; }
+    [[nodiscard]] std::span<const float> biasField() const noexcept { return bias_; }
+    [[nodiscard]] std::span<const float> flatInvField() const noexcept { return flatInv_; }
 
     // Fills raw with the sensor readout for the given frame index and records
     // any transients injected into that frame.
-    void generateRaw(uint32_t frameIndex, std::vector<float>& raw);
+    void generateRaw(std::uint32_t frameIndex, std::vector<float>& raw);
 
-    const std::vector<TransientTruth>& lastTransients() const { return lastTransients_; }
+    [[nodiscard]] std::span<const TransientTruth> lastTransients() const noexcept {
+        return lastTransients_;
+    }
 
 private:
-    void buildStars(uint32_t seed);
-    void buildCalibration(uint32_t seed);
-    void addGaussian(std::vector<float>& image, float cx, float cy, float flux, float sigma) const;
+    void buildCalibration();
+    void buildStars();
+    // Adds a point source with the detector's point spread function to an image.
+    void addGaussian(std::span<float> image, float cx, float cy, float flux) const;
 
-    struct Star {
-        float x;
-        float y;
-        float flux;
-    };
+    static constexpr float kSkyLevel = 100.0f;
+    static constexpr float kBiasLevel = 500.0f;
+    static constexpr float kReadNoise = 5.0f;
+    static constexpr float kPsfSigma = 1.3f;
 
-    uint32_t width_;
-    uint32_t height_;
-    uint32_t seed_;
+    std::uint32_t width_;
+    std::uint32_t height_;
+    std::uint32_t seed_;
 
-    float skyLevel_ = 100.0f;
-    float biasLevel_ = 500.0f;
-    float readNoise_ = 5.0f;
-    float psfSigma_ = 1.3f;
-
-    std::vector<Star> stars_;
     std::vector<float> bias_;
     std::vector<float> flat_;
     std::vector<float> flatInv_;

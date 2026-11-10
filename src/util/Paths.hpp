@@ -1,12 +1,12 @@
 #pragma once
 
-#include <string>
+#include <filesystem>
 
 namespace vkp {
 
-// Absolute directory that contains the running executable, or an empty string if
-// it cannot be determined. Used to find the compiled shaders next to the binary
+// Absolute directory that contains the running executable, or an empty path if it
+// cannot be determined. Used to find the compiled shaders next to the binary
 // regardless of the working directory the program was launched from.
-std::string executableDirectory();
+[[nodiscard]] std::filesystem::path executableDirectory();
 
 } // namespace vkp

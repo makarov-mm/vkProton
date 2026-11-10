@@ -1,4 +1,5 @@
-#version 450
+#version 460
+#extension GL_GOOGLE_include_directive : require
 
 // Stage 4: transient detection on the difference image.
 // A pixel is reported when four conditions hold:
@@ -12,14 +13,7 @@
 // Survivors are appended to a shared list through an atomic counter, the classic
 // stream compaction pattern.
 
-layout(local_size_x = 16, local_size_y = 16) in;
-
-struct Detection {
-    uint  x;
-    uint  y;
-    float diffValue;
-    float snr;
-};
+#include "common.glsl"
 
 layout(std430, binding = 0) readonly buffer DiffBuffer  { float diff[]; };
 layout(std430, binding = 1) readonly buffer MeanBuffer  { float diffMean[]; };
@@ -27,16 +21,12 @@ layout(std430, binding = 2) readonly buffer StdBuffer   { float diffStd[]; };
 layout(std430, binding = 3) buffer CounterBuffer        { uint detectionCount; };
 layout(std430, binding = 4) writeonly buffer OutBuffer  { Detection detections[]; };
 
-layout(push_constant) uniform Push {
-    uint  width;
-    uint  height;
-    int   annulusOuter;
-    int   annulusInner;
-    float detectSigma;
-    float shapeRatio;
-    uint  maxDetections;
-    uint  hasPrev;
-} pc;
+// Difference value at (x, y) with the coordinates clamped to the frame.
+float diffAt(int x, int y) {
+    int w = int(pc.width);
+    int h = int(pc.height);
+    return diff[clamp(y, 0, h - 1) * w + clamp(x, 0, w - 1)];
+}
 
 void main() {
     if (pc.hasPrev == 0u) {
@@ -51,8 +41,6 @@ void main() {
 
     int x = int(gx);
     int y = int(gy);
-    int w = int(pc.width);
-    int h = int(pc.height);
     uint i = gy * pc.width + gx;
 
     float center = diff[i];
@@ -67,13 +55,8 @@ void main() {
 
     // Local maximum test over the 3x3 neighbourhood of the difference image.
     for (int dy = -1; dy <= 1; ++dy) {
-        int ny = clamp(y + dy, 0, h - 1);
         for (int dx = -1; dx <= 1; ++dx) {
-            if (dx == 0 && dy == 0) {
-                continue;
-            }
-            int nx = clamp(x + dx, 0, w - 1);
-            if (diff[ny * w + nx] > center) {
+            if ((dx != 0 || dy != 0) && diffAt(x + dx, y + dy) > center) {
                 return;
             }
         }
@@ -81,22 +64,19 @@ void main() {
 
     // Point spread function shape test: the four direct neighbours should carry
     // a fair fraction of the centre. A lone noise spike fails this.
-    float up = diff[clamp(y - 1, 0, h - 1) * w + x];
-    float down = diff[clamp(y + 1, 0, h - 1) * w + x];
-    float left = diff[y * w + clamp(x - 1, 0, w - 1)];
-    float right = diff[y * w + clamp(x + 1, 0, w - 1)];
-    float neighbourMean = 0.25 * (up + down + left + right);
-    if (neighbourMean < pc.shapeRatio * center) {
-        return;
+    if (pc.shapeRatio > 0.0) {
+        float up = diffAt(x, y - 1);
+        float down = diffAt(x, y + 1);
+        float left = diffAt(x - 1, y);
+        float right = diffAt(x + 1, y);
+        float neighbourMean = 0.25 * (up + down + left + right);
+        if (neighbourMean < pc.shapeRatio * center) {
+            return;
+        }
     }
 
     uint slot = atomicAdd(detectionCount, 1u);
     if (slot < pc.maxDetections) {
-        Detection d;
-        d.x = gx;
-        d.y = gy;
-        d.diffValue = center;
-        d.snr = significance;
-        detections[slot] = d;
+        detections[slot] = Detection(gx, gy, center, significance);
     }
 }

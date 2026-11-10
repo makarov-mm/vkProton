@@ -1,276 +1,275 @@
 #include "VulkanContext.hpp"
 
-#include <cstring>
-#include <set>
-#include <vector>
+#include <algorithm>
+#include <stdexcept>
+#include <string_view>
 
+#include "VulkanUtil.hpp"
 #include "../util/Log.hpp"
 
 namespace vkp {
 
 namespace {
-const char* kValidationLayer = "VK_LAYER_KHRONOS_validation";
+
+constexpr const char* kValidationLayer = "VK_LAYER_KHRONOS_validation";
 
 bool validationLayerAvailable() {
-    uint32_t count = 0;
-    vkEnumerateInstanceLayerProperties(&count, nullptr);
-    std::vector<VkLayerProperties> layers(count);
-    vkEnumerateInstanceLayerProperties(&count, layers.data());
-    for (const auto& layer : layers) {
-        if (std::strcmp(layer.layerName, kValidationLayer) == 0) {
-            return true;
-        }
-    }
-    return false;
+    const auto layers = enumerate<VkLayerProperties>(
+        [](std::uint32_t* count, VkLayerProperties* items) {
+            vkCheck(vkEnumerateInstanceLayerProperties(count, items),
+                    "vkEnumerateInstanceLayerProperties");
+        });
+    return std::ranges::any_of(layers, [](const VkLayerProperties& layer) {
+        return std::string_view(layer.layerName) == kValidationLayer;
+    });
 }
+
+// Higher is better: dedicated hardware first, a CPU rasteriser only as a last resort.
+int deviceRank(VkPhysicalDeviceType type) {
+    switch (type) {
+        case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return 4;
+        case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return 3;
+        case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return 2;
+        case VK_PHYSICAL_DEVICE_TYPE_CPU: return 1;
+        default: return 0;
+    }
+}
+
 } // namespace
 
-VulkanContext::VulkanContext(bool enableValidation) : VulkanContext(ContextConfig{enableValidation, false, {}, {}}) {}
-
-VulkanContext::VulkanContext(const ContextConfig& config) : config_(config) {
-    createInstance();
-    if (config_.enablePresent && config_.surfaceFactory) {
-        surface_ = config_.surfaceFactory(instance_);
-        hasPresent_ = surface_ != VK_NULL_HANDLE;
+VulkanContext::VulkanContext(const ContextConfig& config) {
+    createInstance(config);
+    if (config.createSurface) {
+        surface_ = SurfaceHandle(instance_.get(), config.createSurface(instance_.get()));
+        if (!presenting()) {
+            throw std::runtime_error("the window backend did not provide a surface");
+        }
     }
     selectPhysicalDevice();
-    createLogicalDevice();
+    createDevice();
     createCommandPool();
-    logInfo(std::string("using device: ") + deviceName());
+    // The name is a fixed size character array. Viewing it as a string stops at the
+    // terminator on every standard library.
+    logInfo("using device: {}", std::string_view(properties_.deviceName));
 }
 
-VulkanContext::~VulkanContext() {
-    if (commandPool_ != VK_NULL_HANDLE) {
-        vkDestroyCommandPool(device_, commandPool_, nullptr);
-    }
-    if (device_ != VK_NULL_HANDLE) {
-        vkDestroyDevice(device_, nullptr);
-    }
-    if (surface_ != VK_NULL_HANDLE) {
-        vkDestroySurfaceKHR(instance_, surface_, nullptr);
-    }
-    if (instance_ != VK_NULL_HANDLE) {
-        vkDestroyInstance(instance_, nullptr);
-    }
-}
-
-void VulkanContext::createInstance() {
-    VkApplicationInfo appInfo{};
-    appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    appInfo.pApplicationName = "vkPhoton";
-    appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.pEngineName = "vkPhoton";
-    appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.apiVersion = VK_API_VERSION_1_2;
+void VulkanContext::createInstance(const ContextConfig& config) {
+    // Only Vulkan 1.0 core functionality is used, plus the swapchain extension in
+    // the viewer, so no newer version is asked for.
+    const VkApplicationInfo appInfo{
+        .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+        .pApplicationName = "vkPhoton",
+        .applicationVersion = VK_MAKE_API_VERSION(0, 1, 0, 0),
+        .pEngineName = "vkPhoton",
+        .engineVersion = VK_MAKE_API_VERSION(0, 1, 0, 0),
+        .apiVersion = VK_API_VERSION_1_0,
+    };
 
     std::vector<const char*> layers;
-    if (config_.enableValidation && validationLayerAvailable()) {
-        layers.push_back(kValidationLayer);
-        logInfo("validation layer enabled");
-    } else if (config_.enableValidation) {
-        logInfo("validation layer requested but not available, continuing without it");
+    if (config.enableValidation) {
+        if (validationLayerAvailable()) {
+            layers.push_back(kValidationLayer);
+            logInfo("validation layer enabled");
+        } else {
+            logInfo("validation layer requested but not available, continuing without it");
+        }
     }
 
-    VkInstanceCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-    createInfo.pApplicationInfo = &appInfo;
-    createInfo.enabledLayerCount = static_cast<uint32_t>(layers.size());
-    createInfo.ppEnabledLayerNames = layers.empty() ? nullptr : layers.data();
-    createInfo.enabledExtensionCount = static_cast<uint32_t>(config_.instanceExtensions.size());
-    createInfo.ppEnabledExtensionNames =
-        config_.instanceExtensions.empty() ? nullptr : config_.instanceExtensions.data();
-
-    VK_CHECK(vkCreateInstance(&createInfo, nullptr, &instance_));
+    const VkInstanceCreateInfo createInfo{
+        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        .pApplicationInfo = &appInfo,
+        .enabledLayerCount = static_cast<std::uint32_t>(layers.size()),
+        .ppEnabledLayerNames = layers.data(),
+        .enabledExtensionCount = static_cast<std::uint32_t>(config.instanceExtensions.size()),
+        .ppEnabledExtensionNames = config.instanceExtensions.data(),
+    };
+    vkCheck(vkCreateInstance(&createInfo, nullptr, instance_.put({})), "vkCreateInstance");
 }
 
-bool VulkanContext::familySupportsPresent(VkPhysicalDevice device, uint32_t family) const {
-    if (surface_ == VK_NULL_HANDLE) {
-        return false;
+std::optional<VulkanContext::QueueFamilies> VulkanContext::findQueueFamilies(
+    VkPhysicalDevice device) const {
+    const auto families = enumerate<VkQueueFamilyProperties>(
+        [device](std::uint32_t* count, VkQueueFamilyProperties* items) {
+            vkGetPhysicalDeviceQueueFamilyProperties(device, count, items);
+        });
+
+    // The pipeline needs compute. The viewer also blits into the swapchain on the
+    // same queue, and vkCmdBlitImage is only allowed on a graphics capable family.
+    VkQueueFlags required = VK_QUEUE_COMPUTE_BIT;
+    if (presenting()) {
+        required |= VK_QUEUE_GRAPHICS_BIT;
     }
-    VkBool32 supported = VK_FALSE;
-    vkGetPhysicalDeviceSurfaceSupportKHR(device, family, surface_, &supported);
-    return supported == VK_TRUE;
+
+    const auto canPresent = [&](std::uint32_t family) {
+        VkBool32 supported = VK_FALSE;
+        vkCheck(vkGetPhysicalDeviceSurfaceSupportKHR(device, family, surface_.get(), &supported),
+                "vkGetPhysicalDeviceSurfaceSupportKHR");
+        return supported == VK_TRUE;
+    };
+
+    std::optional<std::uint32_t> compute;
+    std::optional<std::uint32_t> present;
+    for (std::uint32_t family = 0; family < families.size(); ++family) {
+        const bool usable = (families[family].queueFlags & required) == required;
+        const bool presents = presenting() && canPresent(family);
+        if (usable && presents) {
+            // One queue serves both roles, which is the common case.
+            return QueueFamilies{.compute = family, .present = family};
+        }
+        if (usable && !compute) {
+            compute = family;
+        }
+        if (presents && !present) {
+            present = family;
+        }
+    }
+
+    if (!compute || (presenting() && !present)) {
+        return std::nullopt;
+    }
+    return QueueFamilies{.compute = *compute, .present = present.value_or(*compute)};
 }
 
 void VulkanContext::selectPhysicalDevice() {
-    uint32_t count = 0;
-    VK_CHECK(vkEnumeratePhysicalDevices(instance_, &count, nullptr));
-    if (count == 0) {
-        logError("no Vulkan capable device found");
-        std::abort();
+    const auto devices = enumerate<VkPhysicalDevice>(
+        [this](std::uint32_t* count, VkPhysicalDevice* items) {
+            vkCheck(vkEnumeratePhysicalDevices(instance_.get(), count, items),
+                    "vkEnumeratePhysicalDevices");
+        });
+    if (devices.empty()) {
+        throw std::runtime_error("no Vulkan capable device found");
     }
-    std::vector<VkPhysicalDevice> devices(count);
-    VK_CHECK(vkEnumeratePhysicalDevices(instance_, &count, devices.data()));
 
-    // A device is usable if it has a compute queue, and when presenting, a queue
-    // that can present to our surface. Discrete GPUs are preferred.
-    VkPhysicalDevice fallback = VK_NULL_HANDLE;
-    for (VkPhysicalDevice candidate : devices) {
-        uint32_t familyCount = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(candidate, &familyCount, nullptr);
-        std::vector<VkQueueFamilyProperties> families(familyCount);
-        vkGetPhysicalDeviceQueueFamilyProperties(candidate, &familyCount, families.data());
-
-        bool hasCompute = false;
-        bool hasPresent = false;
-        for (uint32_t i = 0; i < familyCount; ++i) {
-            if (families[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
-                hasCompute = true;
-            }
-            if (hasPresent_ && familySupportsPresent(candidate, i)) {
-                hasPresent = true;
-            }
-        }
-        if (!hasCompute || (hasPresent_ && !hasPresent)) {
+    int bestRank = -1;
+    for (const VkPhysicalDevice candidate : devices) {
+        const auto families = findQueueFamilies(candidate);
+        if (!families) {
             continue;
         }
-
-        VkPhysicalDeviceProperties props{};
-        vkGetPhysicalDeviceProperties(candidate, &props);
-        if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(candidate, &properties);
+        if (const int rank = deviceRank(properties.deviceType); rank > bestRank) {
+            bestRank = rank;
             physicalDevice_ = candidate;
-            deviceProperties_ = props;
-            return;
-        }
-        if (fallback == VK_NULL_HANDLE) {
-            fallback = candidate;
+            properties_ = properties;
+            queueFamilies_ = *families;
         }
     }
 
-    if (fallback == VK_NULL_HANDLE) {
-        logError("no device satisfies the required queues");
-        std::abort();
+    if (physicalDevice_ == VK_NULL_HANDLE) {
+        throw std::runtime_error(presenting()
+            ? "no device can both run the pipeline and present to the window"
+            : "no device with a compute queue found");
     }
-    physicalDevice_ = fallback;
-    vkGetPhysicalDeviceProperties(physicalDevice_, &deviceProperties_);
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice_, &memoryProperties_);
 }
 
-void VulkanContext::createLogicalDevice() {
-    uint32_t familyCount = 0;
-    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice_, &familyCount, nullptr);
-    std::vector<VkQueueFamilyProperties> families(familyCount);
-    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice_, &familyCount, families.data());
-
-    // Choose a compute family. Prefer one that can also present, so a single
-    // queue serves both roles on the common hardware where that is possible.
-    bool computeFound = false;
-    for (uint32_t i = 0; i < familyCount; ++i) {
-        const bool compute = (families[i].queueFlags & VK_QUEUE_COMPUTE_BIT) != 0;
-        if (compute && (!hasPresent_ || familySupportsPresent(physicalDevice_, i))) {
-            computeQueueFamily_ = i;
-            computeFound = true;
-            break;
-        }
-    }
-    if (!computeFound) {
-        for (uint32_t i = 0; i < familyCount; ++i) {
-            if (families[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
-                computeQueueFamily_ = i;
-                computeFound = true;
-                break;
-            }
-        }
-    }
-    if (!computeFound) {
-        logError("compute queue family disappeared during device creation");
-        std::abort();
+void VulkanContext::createDevice() {
+    std::vector<std::uint32_t> families{queueFamilies_.compute};
+    if (presenting() && queueFamilies_.present != queueFamilies_.compute) {
+        families.push_back(queueFamilies_.present);
     }
 
-    presentQueueFamily_ = computeQueueFamily_;
-    if (hasPresent_ && !familySupportsPresent(physicalDevice_, computeQueueFamily_)) {
-        for (uint32_t i = 0; i < familyCount; ++i) {
-            if (familySupportsPresent(physicalDevice_, i)) {
-                presentQueueFamily_ = i;
-                break;
-            }
-        }
-    }
-
-    std::set<uint32_t> uniqueFamilies{computeQueueFamily_};
-    if (hasPresent_) {
-        uniqueFamilies.insert(presentQueueFamily_);
-    }
-
-    float priority = 1.0f;
+    const float priority = 1.0f;
     std::vector<VkDeviceQueueCreateInfo> queueInfos;
-    for (uint32_t family : uniqueFamilies) {
-        VkDeviceQueueCreateInfo queueInfo{};
-        queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-        queueInfo.queueFamilyIndex = family;
-        queueInfo.queueCount = 1;
-        queueInfo.pQueuePriorities = &priority;
-        queueInfos.push_back(queueInfo);
+    for (const std::uint32_t family : families) {
+        queueInfos.push_back({
+            .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            .queueFamilyIndex = family,
+            .queueCount = 1,
+            .pQueuePriorities = &priority,
+        });
     }
 
-    std::vector<const char*> deviceExtensions;
-    if (hasPresent_) {
-        deviceExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    std::vector<const char*> extensions;
+    if (presenting()) {
+        extensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
     }
 
-    VkDeviceCreateInfo deviceInfo{};
-    deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    deviceInfo.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
-    deviceInfo.pQueueCreateInfos = queueInfos.data();
-    deviceInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
-    deviceInfo.ppEnabledExtensionNames = deviceExtensions.empty() ? nullptr : deviceExtensions.data();
+    const VkDeviceCreateInfo deviceInfo{
+        .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        .queueCreateInfoCount = static_cast<std::uint32_t>(queueInfos.size()),
+        .pQueueCreateInfos = queueInfos.data(),
+        .enabledExtensionCount = static_cast<std::uint32_t>(extensions.size()),
+        .ppEnabledExtensionNames = extensions.data(),
+    };
+    vkCheck(vkCreateDevice(physicalDevice_, &deviceInfo, nullptr, device_.put({})),
+            "vkCreateDevice");
 
-    VK_CHECK(vkCreateDevice(physicalDevice_, &deviceInfo, nullptr, &device_));
-    vkGetDeviceQueue(device_, computeQueueFamily_, 0, &computeQueue_);
-    if (hasPresent_) {
-        vkGetDeviceQueue(device_, presentQueueFamily_, 0, &presentQueue_);
+    vkGetDeviceQueue(device_.get(), queueFamilies_.compute, 0, &computeQueue_);
+    if (presenting()) {
+        vkGetDeviceQueue(device_.get(), queueFamilies_.present, 0, &presentQueue_);
     }
 }
 
 void VulkanContext::createCommandPool() {
-    VkCommandPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    poolInfo.queueFamilyIndex = computeQueueFamily_;
-    VK_CHECK(vkCreateCommandPool(device_, &poolInfo, nullptr, &commandPool_));
+    const VkCommandPoolCreateInfo poolInfo{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = queueFamilies_.compute,
+    };
+    vkCheck(vkCreateCommandPool(device_.get(), &poolInfo, nullptr,
+                                commandPool_.put(device_.get())),
+            "vkCreateCommandPool");
+    immediateCommands_ = allocateCommandBuffer();
 }
 
-uint32_t VulkanContext::findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags flags) const {
-    VkPhysicalDeviceMemoryProperties memProps{};
-    vkGetPhysicalDeviceMemoryProperties(physicalDevice_, &memProps);
-    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
-        const bool typeAllowed = (typeBits & (1u << i)) != 0;
-        const bool hasFlags = (memProps.memoryTypes[i].propertyFlags & flags) == flags;
-        if (typeAllowed && hasFlags) {
+std::uint32_t VulkanContext::findMemoryType(std::uint32_t typeBits,
+                                            VkMemoryPropertyFlags required,
+                                            VkMemoryPropertyFlags preferred) const {
+    std::optional<std::uint32_t> fallback;
+    for (std::uint32_t i = 0; i < memoryProperties_.memoryTypeCount; ++i) {
+        const VkMemoryPropertyFlags flags = memoryProperties_.memoryTypes[i].propertyFlags;
+        if ((typeBits & (1u << i)) == 0 || (flags & required) != required) {
+            continue;
+        }
+        if ((flags & preferred) == preferred) {
             return i;
         }
+        if (!fallback) {
+            fallback = i;
+        }
     }
-    logError("no suitable memory type found");
-    std::abort();
+    if (!fallback) {
+        throw std::runtime_error("no suitable memory type found");
+    }
+    return *fallback;
 }
 
-void VulkanContext::runCommands(const std::function<void(VkCommandBuffer)>& recorder) const {
-    VkCommandBufferAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocInfo.commandPool = commandPool_;
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandBufferCount = 1;
+VkCommandBuffer VulkanContext::allocateCommandBuffer() const {
+    const VkCommandBufferAllocateInfo allocInfo{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = commandPool_.get(),
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    VkCommandBuffer commands = VK_NULL_HANDLE;
+    vkCheck(vkAllocateCommandBuffers(device_.get(), &allocInfo, &commands),
+            "vkAllocateCommandBuffers");
+    return commands;
+}
 
-    VkCommandBuffer cmd = VK_NULL_HANDLE;
-    VK_CHECK(vkAllocateCommandBuffers(device_, &allocInfo, &cmd));
+VkCommandBuffer VulkanContext::beginImmediate() const {
+    // The pool resets command buffers individually, so beginning the same buffer
+    // again discards what the previous submission recorded.
+    const VkCommandBufferBeginInfo beginInfo{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    vkCheck(vkBeginCommandBuffer(immediateCommands_, &beginInfo), "vkBeginCommandBuffer");
+    return immediateCommands_;
+}
 
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
+void VulkanContext::submitImmediate(VkCommandBuffer commands) const {
+    vkCheck(vkEndCommandBuffer(commands), "vkEndCommandBuffer");
 
-    recorder(cmd);
-
-    VK_CHECK(vkEndCommandBuffer(cmd));
-
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &cmd;
-
-    VK_CHECK(vkQueueSubmit(computeQueue_, 1, &submitInfo, VK_NULL_HANDLE));
-    VK_CHECK(vkQueueWaitIdle(computeQueue_));
-
-    vkFreeCommandBuffers(device_, commandPool_, 1, &cmd);
+    const VkSubmitInfo submitInfo{
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &commands,
+    };
+    vkCheck(vkQueueSubmit(computeQueue_, 1, &submitInfo, VK_NULL_HANDLE), "vkQueueSubmit");
+    vkCheck(vkQueueWaitIdle(computeQueue_), "vkQueueWaitIdle");
 }
 
 } // namespace vkp

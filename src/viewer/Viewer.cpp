@@ -1,265 +1,285 @@
 #include "Viewer.hpp"
 
-#include <cstring>
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <format>
+#include <limits>
+#include <stdexcept>
 
-#include "Swapchain.hpp"
 #include "Window.hpp"
 #include "../core/VulkanContext.hpp"
-#include "../util/Log.hpp"
+#include "../core/VulkanUtil.hpp"
 
 namespace vkp {
 
 namespace {
-void transitionImage(VkCommandBuffer cmd, VkImage image,
-                     VkImageLayout oldLayout, VkImageLayout newLayout,
-                     VkAccessFlags srcAccess, VkAccessFlags dstAccess,
-                     VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage) {
-    VkImageMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.oldLayout = oldLayout;
-    barrier.newLayout = newLayout;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = image;
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.baseMipLevel = 0;
-    barrier.subresourceRange.levelCount = 1;
-    barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount = 1;
-    barrier.srcAccessMask = srcAccess;
-    barrier.dstAccessMask = dstAccess;
-    vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+constexpr VkImageSubresourceRange kColorRange{
+    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+    .baseMipLevel = 0,
+    .levelCount = 1,
+    .baseArrayLayer = 0,
+    .layerCount = 1,
+};
+
+constexpr VkImageSubresourceLayers kColorLayer{
+    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+    .mipLevel = 0,
+    .baseArrayLayer = 0,
+    .layerCount = 1,
+};
+
+// What an image is doing on one side of a barrier: its layout, plus the pipeline
+// stage and access that touch it there.
+struct ImageState {
+    VkImageLayout layout;
+    VkPipelineStageFlags stage;
+    VkAccessFlags access;
+};
+
+// Contents not needed. The transfer stage orders the layout change after whatever
+// used the image there before: the previous frame's blit for the display image,
+// and for a swapchain image the acquire semaphore, which the submit waits on at
+// that same stage.
+constexpr ImageState kDiscarded{VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_TRANSFER_BIT, 0};
+constexpr ImageState kTransferTarget{VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT};
+constexpr ImageState kTransferSource{VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT};
+constexpr ImageState kPresentable{VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                                  VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0};
+
+void imageBarrier(VkCommandBuffer commands, VkImage image, ImageState from, ImageState to) {
+    const VkImageMemoryBarrier barrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = from.access,
+        .dstAccessMask = to.access,
+        .oldLayout = from.layout,
+        .newLayout = to.layout,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = kColorRange,
+    };
+    vkCmdPipelineBarrier(commands, from.stage, to.stage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 }
+
+// A frame has to fit in a single 2D image on this device to be displayed.
+VkExtent2D checkedFrameExtent(const VulkanContext& context, std::uint32_t width,
+                              std::uint32_t height) {
+    const std::uint32_t limit = context.limits().maxImageDimension2D;
+    if (width == 0 || height == 0 || width > limit || height > limit) {
+        throw std::runtime_error(std::format(
+            "a {}x{} frame cannot be displayed, the device limit is {} pixels per side", width,
+            height, limit));
+    }
+    return {width, height};
+}
+
+// The largest rectangle with the frame's aspect ratio that fits in the target,
+// centred, as the two corner offsets a blit expects.
+std::array<VkOffset3D, 2> letterbox(VkExtent2D frame, VkExtent2D target) {
+    const double scale = std::min(static_cast<double>(target.width) / frame.width,
+                                  static_cast<double>(target.height) / frame.height);
+    const auto fit = [scale](std::uint32_t frameSide, std::uint32_t targetSide) {
+        const auto scaled = static_cast<std::int32_t>(std::lround(frameSide * scale));
+        return std::clamp(scaled, 1, static_cast<std::int32_t>(targetSide));
+    };
+    const std::int32_t width = fit(frame.width, target.width);
+    const std::int32_t height = fit(frame.height, target.height);
+    const std::int32_t x = (static_cast<std::int32_t>(target.width) - width) / 2;
+    const std::int32_t y = (static_cast<std::int32_t>(target.height) - height) / 2;
+    return {{{x, y, 0}, {x + width, y + height, 1}}};
+}
+
 } // namespace
 
 Viewer::Viewer(const VulkanContext& context, const Window& window,
-               uint32_t frameWidth, uint32_t frameHeight)
-    : context_(context), window_(window), frameWidth_(frameWidth), frameHeight_(frameHeight) {
-    uint32_t w = frameWidth_;
-    uint32_t h = frameHeight_;
-    window_.framebufferSize(w, h);
-    if (w == 0 || h == 0) {
-        w = frameWidth_;
-        h = frameHeight_;
-    }
-    swapchain_ = std::make_unique<Swapchain>(context_, w, h);
+               std::uint32_t frameWidth, std::uint32_t frameHeight)
+    : context_(context),
+      window_(window),
+      frameExtent_(checkedFrameExtent(context, frameWidth, frameHeight)),
+      windowExtent_(window.framebufferSize()),
+      swapchain_(context, windowExtent_),
+      staging_(context, VkDeviceSize{frameWidth} * frameHeight * 4, Buffer::Kind::Upload),
+      commands_(context.allocateCommandBuffer()) {
     createDisplayImage();
-    createStaging();
-    createSyncAndCommands();
+
+    const VkDevice device = context_.device();
+    const VkSemaphoreCreateInfo semaphoreInfo{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    vkCheck(vkCreateSemaphore(device, &semaphoreInfo, nullptr, imageAvailable_.put(device)),
+            "vkCreateSemaphore");
+
+    // The fence starts signalled, so the first frame has nothing to wait for.
+    const VkFenceCreateInfo fenceInfo{
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+    };
+    vkCheck(vkCreateFence(device, &fenceInfo, nullptr, inFlight_.put(device)), "vkCreateFence");
 }
 
 Viewer::~Viewer() {
-    VkDevice device = context_.device();
-    vkDeviceWaitIdle(device);
-
-    if (inFlight_ != VK_NULL_HANDLE) vkDestroyFence(device, inFlight_, nullptr);
-    if (imageAvailable_ != VK_NULL_HANDLE) vkDestroySemaphore(device, imageAvailable_, nullptr);
-    if (renderFinished_ != VK_NULL_HANDLE) vkDestroySemaphore(device, renderFinished_, nullptr);
-    if (commandBuffer_ != VK_NULL_HANDLE) {
-        vkFreeCommandBuffers(device, context_.commandPool(), 1, &commandBuffer_);
-    }
-    if (stagingMapped_ != nullptr) vkUnmapMemory(device, stagingMemory_);
-    if (staging_ != VK_NULL_HANDLE) vkDestroyBuffer(device, staging_, nullptr);
-    if (stagingMemory_ != VK_NULL_HANDLE) vkFreeMemory(device, stagingMemory_, nullptr);
-    if (displayImage_ != VK_NULL_HANDLE) vkDestroyImage(device, displayImage_, nullptr);
-    if (displayMemory_ != VK_NULL_HANDLE) vkFreeMemory(device, displayMemory_, nullptr);
-
-    swapchain_.reset();
+    // The last frame may still be executing or waiting to be presented.
+    vkDeviceWaitIdle(context_.device());
 }
 
 void Viewer::createDisplayImage() {
-    VkImageCreateInfo info{};
-    info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    info.imageType = VK_IMAGE_TYPE_2D;
-    info.format = VK_FORMAT_R8G8B8A8_UNORM;
-    info.extent = {frameWidth_, frameHeight_, 1};
-    info.mipLevels = 1;
-    info.arrayLayers = 1;
-    info.samples = VK_SAMPLE_COUNT_1_BIT;
-    info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    VK_CHECK(vkCreateImage(context_.device(), &info, nullptr, &displayImage_));
+    const VkDevice device = context_.device();
+
+    const VkImageCreateInfo imageInfo{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_UNORM,
+        .extent = {frameExtent_.width, frameExtent_.height, 1},
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    vkCheck(vkCreateImage(device, &imageInfo, nullptr, displayImage_.put(device)),
+            "vkCreateImage");
 
     VkMemoryRequirements requirements{};
-    vkGetImageMemoryRequirements(context_.device(), displayImage_, &requirements);
+    vkGetImageMemoryRequirements(device, displayImage_.get(), &requirements);
 
-    VkMemoryAllocateInfo alloc{};
-    alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    alloc.allocationSize = requirements.size;
-    alloc.memoryTypeIndex = context_.findMemoryType(requirements.memoryTypeBits,
-                                                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    VK_CHECK(vkAllocateMemory(context_.device(), &alloc, nullptr, &displayMemory_));
-    VK_CHECK(vkBindImageMemory(context_.device(), displayImage_, displayMemory_, 0));
+    const VkMemoryAllocateInfo allocInfo{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = requirements.size,
+        .memoryTypeIndex = context_.findMemoryType(requirements.memoryTypeBits,
+                                                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+    };
+    vkCheck(vkAllocateMemory(device, &allocInfo, nullptr, displayMemory_.put(device)),
+            "vkAllocateMemory");
+    vkCheck(vkBindImageMemory(device, displayImage_.get(), displayMemory_.get(), 0),
+            "vkBindImageMemory");
 }
 
-void Viewer::createStaging() {
-    stagingBytes_ = static_cast<VkDeviceSize>(frameWidth_) * frameHeight_ * 4;
-
-    VkBufferCreateInfo info{};
-    info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    info.size = stagingBytes_;
-    info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    VK_CHECK(vkCreateBuffer(context_.device(), &info, nullptr, &staging_));
-
-    VkMemoryRequirements requirements{};
-    vkGetBufferMemoryRequirements(context_.device(), staging_, &requirements);
-
-    VkMemoryAllocateInfo alloc{};
-    alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    alloc.allocationSize = requirements.size;
-    alloc.memoryTypeIndex = context_.findMemoryType(
-        requirements.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    VK_CHECK(vkAllocateMemory(context_.device(), &alloc, nullptr, &stagingMemory_));
-    VK_CHECK(vkBindBufferMemory(context_.device(), staging_, stagingMemory_, 0));
-    VK_CHECK(vkMapMemory(context_.device(), stagingMemory_, 0, stagingBytes_, 0, &stagingMapped_));
-}
-
-void Viewer::createSyncAndCommands() {
-    VkCommandBufferAllocateInfo alloc{};
-    alloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    alloc.commandPool = context_.commandPool();
-    alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    alloc.commandBufferCount = 1;
-    VK_CHECK(vkAllocateCommandBuffers(context_.device(), &alloc, &commandBuffer_));
-
-    VkSemaphoreCreateInfo semInfo{};
-    semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    VK_CHECK(vkCreateSemaphore(context_.device(), &semInfo, nullptr, &imageAvailable_));
-    VK_CHECK(vkCreateSemaphore(context_.device(), &semInfo, nullptr, &renderFinished_));
-
-    VkFenceCreateInfo fenceInfo{};
-    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    VK_CHECK(vkCreateFence(context_.device(), &fenceInfo, nullptr, &inFlight_));
-}
-
-void Viewer::recreateSwapchain() {
-    uint32_t w = 0;
-    uint32_t h = 0;
-    window_.framebufferSize(w, h);
-    if (w == 0 || h == 0) {
-        return; // minimised, nothing to present to
+void Viewer::rebuildSwapchain() {
+    const VkExtent2D size = window_.framebufferSize();
+    if (size.width == 0 || size.height == 0) {
+        return;  // minimised, nothing to present to
     }
-    swapchain_->recreate(w, h);
+    swapchain_.recreate(size);
+    windowExtent_ = size;
 }
 
-void Viewer::showFrame(const std::vector<uint8_t>& rgba) {
-    if (rgba.size() < stagingBytes_) {
-        logError("frame pixel buffer is smaller than the display image");
+void Viewer::showFrame(std::span<const std::uint8_t> rgba) {
+    if (rgba.size() != staging_.size()) {
+        throw std::invalid_argument("frame pixel buffer does not match the display image");
+    }
+
+    // Follow the window size directly. Not every platform reports a resize through
+    // an out of date swapchain.
+    const VkExtent2D size = window_.framebufferSize();
+    if (size.width == 0 || size.height == 0) {
         return;
     }
-
-    vkWaitForFences(context_.device(), 1, &inFlight_, VK_TRUE, UINT64_MAX);
-
-    std::memcpy(stagingMapped_, rgba.data(), static_cast<size_t>(stagingBytes_));
-
-    uint32_t imageIndex = 0;
-    VkResult acquireResult = swapchain_->acquire(imageAvailable_, imageIndex);
-    if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
-        recreateSwapchain();
-        return;
-    }
-    if (acquireResult != VK_SUCCESS && acquireResult != VK_SUBOPTIMAL_KHR) {
-        logError("failed to acquire a swapchain image");
-        return;
+    if (size.width != windowExtent_.width || size.height != windowExtent_.height) {
+        rebuildSwapchain();
     }
 
-    vkResetFences(context_.device(), 1, &inFlight_);
-    recordAndSubmit(imageIndex);
+    // Wait for the previous frame before touching the staging buffer it reads.
+    const VkDevice device = context_.device();
+    const VkFence inFlight = inFlight_.get();
+    constexpr std::uint64_t noTimeout = std::numeric_limits<std::uint64_t>::max();
+    vkCheck(vkWaitForFences(device, 1, &inFlight, VK_TRUE, noTimeout), "vkWaitForFences");
+    staging_.write(rgba);
 
-    VkPresentInfoKHR present{};
-    present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    present.waitSemaphoreCount = 1;
-    present.pWaitSemaphores = &renderFinished_;
-    VkSwapchainKHR chain = swapchain_->handle();
-    present.swapchainCount = 1;
-    present.pSwapchains = &chain;
-    present.pImageIndices = &imageIndex;
+    std::uint32_t imageIndex = 0;
+    const VkSemaphore imageAvailable = imageAvailable_.get();
+    const VkResult acquired = swapchain_.acquire(imageAvailable, imageIndex);
+    if (acquired == VK_ERROR_OUT_OF_DATE_KHR) {
+        rebuildSwapchain();
+        return;
+    }
+    if (acquired != VK_SUBOPTIMAL_KHR) {
+        vkCheck(acquired, "vkAcquireNextImageKHR");
+    }
 
-    VkResult presentResult = vkQueuePresentKHR(context_.presentQueue(), &present);
-    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
-        recreateSwapchain();
+    recordFrame(imageIndex);
+
+    const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    const VkSemaphore presentReady = swapchain_.presentSemaphore(imageIndex);
+    const VkSubmitInfo submitInfo{
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &imageAvailable,
+        .pWaitDstStageMask = &waitStage,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &commands_,
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = &presentReady,
+    };
+    vkCheck(vkResetFences(device, 1, &inFlight), "vkResetFences");
+    vkCheck(vkQueueSubmit(context_.computeQueue(), 1, &submitInfo, inFlight), "vkQueueSubmit");
+
+    const VkSwapchainKHR swapchain = swapchain_.handle();
+    const VkPresentInfoKHR presentInfo{
+        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &presentReady,
+        .swapchainCount = 1,
+        .pSwapchains = &swapchain,
+        .pImageIndices = &imageIndex,
+    };
+    const VkResult presented = vkQueuePresentKHR(context_.presentQueue(), &presentInfo);
+    if (presented == VK_ERROR_OUT_OF_DATE_KHR || presented == VK_SUBOPTIMAL_KHR) {
+        rebuildSwapchain();
+    } else {
+        vkCheck(presented, "vkQueuePresentKHR");
     }
 }
 
-void Viewer::recordAndSubmit(uint32_t imageIndex) {
-    VkImage swapImage = swapchain_->image(imageIndex);
-    VkExtent2D extent = swapchain_->extent();
+void Viewer::recordFrame(std::uint32_t imageIndex) const {
+    const VkImage displayImage = displayImage_.get();
+    const VkImage swapImage = swapchain_.image(imageIndex);
 
-    VK_CHECK(vkResetCommandBuffer(commandBuffer_, 0));
-    VkCommandBufferBeginInfo begin{};
-    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    VK_CHECK(vkBeginCommandBuffer(commandBuffer_, &begin));
+    const VkCommandBufferBeginInfo beginInfo{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    vkCheck(vkBeginCommandBuffer(commands_, &beginInfo), "vkBeginCommandBuffer");
 
-    // Upload the new frame into the display image.
-    transitionImage(commandBuffer_, displayImage_,
-                    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                    0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    // Upload the new frame into the display image, then make it the blit source.
+    imageBarrier(commands_, displayImage, kDiscarded, kTransferTarget);
+    const VkBufferImageCopy upload{
+        .imageSubresource = kColorLayer,
+        .imageExtent = {frameExtent_.width, frameExtent_.height, 1},
+    };
+    vkCmdCopyBufferToImage(commands_, staging_.handle(), displayImage,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &upload);
+    imageBarrier(commands_, displayImage, kTransferTarget, kTransferSource);
 
-    VkBufferImageCopy copy{};
-    copy.bufferOffset = 0;
-    copy.bufferRowLength = 0;
-    copy.bufferImageHeight = 0;
-    copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    copy.imageSubresource.mipLevel = 0;
-    copy.imageSubresource.baseArrayLayer = 0;
-    copy.imageSubresource.layerCount = 1;
-    copy.imageOffset = {0, 0, 0};
-    copy.imageExtent = {frameWidth_, frameHeight_, 1};
-    vkCmdCopyBufferToImage(commandBuffer_, staging_, displayImage_,
-                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    // Clear the swapchain image to black, which is what shows around the frame
+    // when the window has a different aspect ratio. The clear and the blit both
+    // write the image, so a barrier in the same layout puts them in order.
+    imageBarrier(commands_, swapImage, kDiscarded, kTransferTarget);
+    const VkClearColorValue black{.float32 = {0.0f, 0.0f, 0.0f, 1.0f}};
+    vkCmdClearColorImage(commands_, swapImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1,
+                         &kColorRange);
+    imageBarrier(commands_, swapImage, kTransferTarget, kTransferTarget);
 
-    // Prepare display image as blit source and the swapchain image as blit dest.
-    transitionImage(commandBuffer_, displayImage_,
-                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-    transitionImage(commandBuffer_, swapImage,
-                    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                    0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-
-    // Blit, scaling the frame to the window size.
-    VkImageBlit blit{};
-    blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    blit.srcSubresource.mipLevel = 0;
-    blit.srcSubresource.baseArrayLayer = 0;
-    blit.srcSubresource.layerCount = 1;
-    blit.srcOffsets[0] = {0, 0, 0};
-    blit.srcOffsets[1] = {static_cast<int32_t>(frameWidth_), static_cast<int32_t>(frameHeight_), 1};
-    blit.dstSubresource = blit.srcSubresource;
-    blit.dstOffsets[0] = {0, 0, 0};
-    blit.dstOffsets[1] = {static_cast<int32_t>(extent.width), static_cast<int32_t>(extent.height), 1};
-    vkCmdBlitImage(commandBuffer_,
-                   displayImage_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                   swapImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                   1, &blit, VK_FILTER_LINEAR);
+    // Blit, scaling the frame to fit the window.
+    const std::array<VkOffset3D, 2> target = letterbox(frameExtent_, swapchain_.extent());
+    const VkImageBlit blit{
+        .srcSubresource = kColorLayer,
+        .srcOffsets = {{0, 0, 0},
+                       {static_cast<std::int32_t>(frameExtent_.width),
+                        static_cast<std::int32_t>(frameExtent_.height), 1}},
+        .dstSubresource = kColorLayer,
+        .dstOffsets = {target[0], target[1]},
+    };
+    vkCmdBlitImage(commands_, displayImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapImage,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
 
     // Hand the swapchain image to the presentation engine.
-    transitionImage(commandBuffer_, swapImage,
-                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                    VK_ACCESS_TRANSFER_WRITE_BIT, 0,
-                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    imageBarrier(commands_, swapImage, kTransferTarget, kPresentable);
 
-    VK_CHECK(vkEndCommandBuffer(commandBuffer_));
-
-    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    VkSubmitInfo submit{};
-    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit.waitSemaphoreCount = 1;
-    submit.pWaitSemaphores = &imageAvailable_;
-    submit.pWaitDstStageMask = &waitStage;
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &commandBuffer_;
-    submit.signalSemaphoreCount = 1;
-    submit.pSignalSemaphores = &renderFinished_;
-    VK_CHECK(vkQueueSubmit(context_.computeQueue(), 1, &submit, inFlight_));
+    vkCheck(vkEndCommandBuffer(commands_), "vkEndCommandBuffer");
 }
 
 } // namespace vkp

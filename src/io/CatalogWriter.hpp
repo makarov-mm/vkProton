@@ -1,9 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
-#include <string>
-#include <vector>
+#include <span>
 
 #include "../pipeline/Detection.hpp"
 
@@ -14,14 +14,16 @@ namespace vkp {
 // list of what was found and where.
 class CatalogWriter {
 public:
-    explicit CatalogWriter(const std::string& path);
-    ~CatalogWriter();
+    // Creates the file and writes the header row. Throws if it cannot be opened.
+    explicit CatalogWriter(const std::filesystem::path& path);
 
-    bool isOpen() const { return file_.is_open(); }
+    void writeFrame(std::uint32_t frameIndex, std::span<const Detection> detections);
 
-    void writeFrame(uint32_t frameIndex, const std::vector<Detection>& detections);
+    // Flushes the catalogue to disk and throws if any of it could not be written.
+    void close();
 
 private:
+    std::filesystem::path path_;
     std::ofstream file_;
 };
 

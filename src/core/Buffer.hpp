@@ -1,49 +1,57 @@
 #pragma once
 
 #include <cstddef>
+#include <ranges>
+#include <span>
 
 #include <vulkan/vulkan.h>
+
+#include "Handle.hpp"
 
 namespace vkp {
 
 class VulkanContext;
 
-// A single storage buffer plus its backing memory. Two flavours are used:
-//   host visible, for staging uploads and reading results back
-//   device local, for the buffers the compute shaders actually touch
-// One allocation per buffer is not how a production engine manages memory, but
-// at this scale it keeps ownership obvious and the code readable.
+// A single buffer plus its backing memory. One allocation per buffer is not how a
+// production engine manages memory, but at this scale it keeps ownership obvious
+// and the code readable.
 class Buffer {
 public:
-    Buffer(const VulkanContext& context,
-           VkDeviceSize size,
-           VkBufferUsageFlags usage,
-           VkMemoryPropertyFlags memoryFlags);
-    ~Buffer();
+    enum class Kind {
+        Storage,   // device local, bound to the compute shaders and usable in copies
+        Upload,    // host visible staging memory: the CPU writes, the GPU copies out
+        Readback,  // host visible result memory: the GPU copies in, the CPU reads
+    };
 
-    Buffer(const Buffer&) = delete;
-    Buffer& operator=(const Buffer&) = delete;
+    Buffer(const VulkanContext& context, VkDeviceSize size, Kind kind);
 
-    VkBuffer handle() const { return buffer_; }
-    VkDeviceSize size() const { return size_; }
+    [[nodiscard]] VkBuffer handle() const noexcept { return buffer_.get(); }
+    [[nodiscard]] VkDeviceSize size() const noexcept { return size_; }
 
-    // Valid only for host visible buffers. Returns a persistent mapping.
-    void* map();
-    void unmap();
+    // Copies a contiguous range of trivially copyable values to the start of a host
+    // visible buffer.
+    template <std::ranges::contiguous_range Range>
+    void write(const Range& source) {
+        writeBytes(std::as_bytes(std::span(source)));
+    }
 
-    // Copies raw bytes into a host visible buffer through the persistent mapping.
-    void upload(const void* data, VkDeviceSize bytes);
-
-    // Copies raw bytes out of a host visible buffer into a caller provided block.
-    void download(void* data, VkDeviceSize bytes);
+    // Views the first count values of a host visible buffer. Host visible buffers
+    // stay mapped for their whole life, so the view remains valid and always shows
+    // what the GPU copied there last.
+    template <typename T>
+    [[nodiscard]] std::span<const T> view(std::size_t count) const {
+        return {static_cast<const T*>(mappedBytes(count * sizeof(T))), count};
+    }
 
 private:
-    const VulkanContext& context_;
-    VkDeviceSize size_ = 0;
-    VkBuffer buffer_ = VK_NULL_HANDLE;
-    VkDeviceMemory memory_ = VK_NULL_HANDLE;
+    void writeBytes(std::span<const std::byte> source);
+    [[nodiscard]] const void* mappedBytes(std::size_t byteCount) const;
+
+    VkDeviceSize size_;
+    // The memory is declared first so it outlives the buffer bound to it.
+    MemoryHandle memory_;
+    BufferHandle buffer_;
     void* mapped_ = nullptr;
-    bool hostVisible_ = false;
 };
 
 } // namespace vkp

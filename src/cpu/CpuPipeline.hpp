@@ -1,9 +1,12 @@
 #pragma once
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <span>
 #include <vector>
 
-#include "../pipeline/Detection.hpp"
-#include "../pipeline/TransientPipeline.hpp"
+#include "../pipeline/PipelineConfig.hpp"
 
 namespace vkp {
 
@@ -11,25 +14,40 @@ namespace vkp {
 // It exists as a reference: to sanity check the GPU output and to give the
 // benchmark an honest CPU baseline. It is deliberately not vectorised or
 // threaded, so it represents the naive starting point a GPU port improves on.
+// Each stage is one method that mirrors the shader of the same name.
 class CpuPipeline {
 public:
     explicit CpuPipeline(const PipelineConfig& config);
 
-    void uploadCalibration(const std::vector<float>& bias, const std::vector<float>& flatInv);
-    FrameResult processFrame(const std::vector<float>& raw);
-
-    const std::vector<float>& lastCalibrated() const { return calibrated_; }
-    void resetHistory() { frameCounter_ = 0; }
+    void uploadCalibration(std::span<const float> bias, std::span<const float> flatInv);
+    FrameResult processFrame(std::span<const float> raw);
 
 private:
+    struct RingStats {
+        float mean;
+        float sigma;
+    };
+
+    void calibrate(std::span<const float> raw, std::span<float> calibrated) const;
+    void difference(std::span<const float> calibrated, std::span<const float> previous);
+    void background();
+    [[nodiscard]] FrameResult detect() const;
+
+    [[nodiscard]] RingStats ringStats(int x, int y, bool clip, RingStats estimate) const;
+    [[nodiscard]] bool isLocalMaximum(int x, int y, float center) const;
+    [[nodiscard]] float diffAt(int x, int y) const;
+    [[nodiscard]] std::size_t pixelIndex(int x, int y) const noexcept;
+
     PipelineConfig config_;
-    size_t pixelCount_ = 0;
-    uint32_t frameCounter_ = 0;
+    int width_;
+    int height_;
+    std::size_t pixelCount_;
+    std::uint32_t frameCounter_ = 0;
 
     std::vector<float> bias_;
     std::vector<float> flatInv_;
-    std::vector<float> calibrated_;
-    std::vector<float> prevCalibrated_;
+    // Ping pong pair, as on the GPU, so keeping the previous frame costs no copy.
+    std::array<std::vector<float>, 2> calibrated_;
     std::vector<float> diff_;
     std::vector<float> diffMean_;
     std::vector<float> diffStd_;

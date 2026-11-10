@@ -2,6 +2,7 @@
 build/
 out/
 cmake-build-*/
+x64/
 
 # Compiled shaders
 *.spv
@@ -12,6 +13,7 @@ output/
 *.csv
 
 # Editor and OS
+.vs/
 .vscode/
 .idea/
 *.user
